@@ -10,6 +10,7 @@
 
 // User can set his own server apiUrl through localstorage.
 const API_URL = localStorage.getItem('apiUrl') || 'https://api.files.md';
+const SYNC_PROTOCOL_VERSION = window.FILES_MD_LOCAL_SERVER ? '3' : '2';
 const CURRENT_FILE_SYNC_INTERVAL = 1000; // ms, how often to save currently open file
 // Matches server's MaxMediaSize (server/sync/sync.go). Server caps the JSON
 // request body, which holds base64 (~33% inflation), so the effective raw
@@ -279,6 +280,7 @@ async function loadLocalFiles(rootDirHandle, slowMode = false) {
 }
 
 async function syncFilesWithServer() {
+    if (window.FILES_MD_LOCAL_SERVER) return syncLocalNotes();
     // We should have at least one 200 response from service.
     // The first 200 response we get from /token, meaning that
     // our application is linked to the server for sync.
@@ -438,6 +440,7 @@ async function syncFilesWithServerOnce() {
 }
 
 async function syncLocalFileWithServer(path) {
+    if (window.FILES_MD_LOCAL_SERVER) return syncLocalNotes(path);
     // We should have at least one 200 response from service.
     // The first 200 response we get from /token, meaning that
     // our application is linked to the server for sync.
@@ -583,7 +586,7 @@ async function syncMediaFiles() {
                     credentials: 'include',
                     headers: {
                         'Content-Type': 'application/json',
-                        'X-FilesMD-Sync': '2',
+                        'X-FilesMD-Sync': SYNC_PROTOCOL_VERSION,
                         'Version': getCurrentVersion(),
                     },
                     body: JSON.stringify({
@@ -632,7 +635,7 @@ async function syncMediaFiles() {
                     credentials: 'include',
                     headers: {
                         'Content-Type': 'application/json',
-                        'X-FilesMD-Sync': '2',
+                        'X-FilesMD-Sync': SYNC_PROTOCOL_VERSION,
                     },
                     body: JSON.stringify({
                         filename: filename,
@@ -1192,6 +1195,7 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
         }
 
         currentEditor.path = path;
+        currentEditor.noteVersion = getServerFile(path)?.version;
         if (saveToHistory) {
             const state = {
                 path: path,
@@ -1249,6 +1253,7 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
         }
 
         const end = performance.now();
+        currentEditor.noteVersion = getServerFile(path)?.version;
         log(`File ${path} opened in: ${(end - start).toFixed(3)} milliseconds, opId: ${id}`);
 
         // Once we spent enough time in file, set viewportMargin to infinity to prevent artefacts.
@@ -1275,6 +1280,9 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
 // If currentEditor is changed during the execution of this function, we'll have RC.
 // So, wherever we change currentEditor reference, we should lock via isMessingWithCurrentEditor.
 async function syncCurrentFile(switchAwayEditor = false) {
+    if (window.FILES_MD_LOCAL_SERVER) {
+        while (isSyncingFiles) await new Promise(resolve => setTimeout(resolve, 25));
+    }
     if (files === undefined || debug || !window.currentEditor || currentEditor.path === undefined) {
         return;
     }
@@ -1505,8 +1513,8 @@ async function syncCurrentFile(switchAwayEditor = false) {
                 // of our saving process. The new unsaved changes would be then handled by a subsequent saveCurrentFile() call.
                 // Initially, this flag assignment was erroneously placed at the end of the function, resulting in a race condition.
                 // If we override flag in the end, we would lose any changes that occurred during the 3 await calls.
+                if (window.FILES_MD_LOCAL_SERVER) stageLocalDraft(path, freshContent, currentEditor.noteVersion);
                 currentEditor.markClean();
-
                 const writable = await file.handle.createWritable();
                 await writable.write(freshContent);
                 // Buffer is flushed on disk at this moment. It could be interrupted

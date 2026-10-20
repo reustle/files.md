@@ -257,7 +257,8 @@ async function toggleChatModal() {
 }
 
 async function parseMessagesFromChat() {
-    const file = await ((await getFileHandle(CHAT_PATH, true)).getFile());
+    if (!await exists(CHAT_PATH)) return {messages: [], text: ''};
+    const file = await ((await getFileHandle(CHAT_PATH)).getFile());
     let chat = await file.text();
 
     // Normalize line endings

@@ -52,7 +52,8 @@ async function read(path) {
     return await file.text();
 }
 
-async function write(path, content) {
+async function write(path, content, {stageDraft = true} = {}) {
+    if (window.FILES_MD_LOCAL_SERVER && stageDraft) stageLocalDraft(path, content);
     let fileHandle = await getFileHandle(path, true);
     const writable = await fileHandle.createWritable();
     await writable.write(content);
@@ -66,6 +67,9 @@ async function writeAtEnd(path, content) {
         throw new Error('Invalid file name');
     }
 
+    if (window.FILES_MD_LOCAL_SERVER) {
+        stageLocalDraft(path, await (await fileHandle.getFile()).text() + content);
+    }
     const writable = await fileHandle.createWritable({ keepExistingData: true });
     await writable.seek(await fileHandle.getFile().then(file => file.size));
     await writable.write(content);
@@ -77,7 +81,8 @@ async function writeAtEnd(path, content) {
 
 // TODO save metadata & files
 // Write only if content is different.
-async function writeIfContentIsDifferent(path, content) {
+async function writeIfContentIsDifferent(path, content, {stageDraft = true} = {}) {
+    if (window.FILES_MD_LOCAL_SERVER && stageDraft) stageLocalDraft(path, content);
     let fileHandle = await getFileHandle(path, true);
     if (fileHandle === null) {
         // TODO fix once Chromium fixes the bug
@@ -119,7 +124,7 @@ async function remove(path, {moveTo = null, syncDeletion = true} = {}) {
         logError('Malformed name, skipping file...');
         return;
     }
-    const baseline = getServerFile(path)?.lastModified;
+    const baseline = window.FILES_MD_LOCAL_SERVER ? getServerFile(path)?.version : getServerFile(path)?.lastModified;
     if (typeof fileHandle.remove === 'function') {
         await fileHandle.remove();
     } else {
@@ -130,6 +135,13 @@ async function remove(path, {moveTo = null, syncDeletion = true} = {}) {
         await dir.removeEntry(filename);
     }
     if (syncDeletion && baseline) pendingFileDeletes.set(path, baseline);
+    if (syncDeletion && window.FILES_MD_LOCAL_SERVER) {
+        if (baseline) stageLocalDelete(path, baseline);
+        else {
+            delete localDrafts[path];
+            persistLocalDrafts();
+        }
+    }
     if (syncDeletion && moveTo) recordFileMove(path, moveTo);
     log(`File ${path} removed successfully.`);
 

@@ -50,6 +50,7 @@ const urlsToCache = [
     '/welcome.js',
     '/server-config.js',
     '/files.js',
+    '/local-sync.js',
     '/editor.js',
     '/chat.js',
     '/modals.js',

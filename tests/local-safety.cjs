@@ -14,7 +14,7 @@ const repo = path.resolve(__dirname, '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const originals = {
     'Original.md': 'Original content',
-    'Plain.txt': 'Plain text content',
+    'Plain.md': 'Plain text content',
     'Help.md': 'My own help note',
     'nested/Note.md': 'Nested content',
     'unrelated.csv': 'Untouched,unsupported\n',
@@ -117,6 +117,69 @@ async function verifyFolderPicker(page) {
     await assertNoSamples(page);
 }
 
+async function verifyLiveChanges(page, notes) {
+    const watched = path.join(notes, 'Watching');
+    await fs.mkdir(watched);
+    const filename = path.join(watched, 'Live.md');
+    await fs.writeFile(filename, 'Stable line\nOld ending');
+    await fs.utimes(filename, new Date(1000), new Date(1000));
+    // No focus/blur or manual sync: the poll must discover an old-dated file.
+    await page.waitForFunction(() => !isSyncingFiles && getMemFile('/Watching/Live.md'));
+    assert.equal(await page.evaluate(() => read('/Watching/Live.md')), 'Stable line\nOld ending');
+    await page.evaluate(async () => {
+        await openFile('/Watching/Live.md');
+        currentEditor.setCursor({line: 1, ch: 3});
+    });
+    await fs.writeFile(filename, 'Stable line\nUpdated on disk');
+    await fs.utimes(filename, new Date(1000), new Date(1000));
+    await page.waitForFunction(() => currentEditor.getValue() === '# Live\nStable line\nUpdated on disk');
+    assert.deepEqual(await page.evaluate(() => ({line: currentEditor.getCursor().line, ch: currentEditor.getCursor().ch})), {line: 1, ch: 3});
+
+    // An external rename is reflected without resurrecting the old name.
+    const renamed = path.join(watched, 'Renamed.md');
+    await fs.rename(filename, renamed);
+    await page.waitForFunction(() => getMemFile('/Watching/Renamed.md') && !getMemFile('/Watching/Live.md'));
+    await assert.rejects(fs.stat(filename), {code: 'ENOENT'});
+
+    await page.evaluate(async () => {
+        clearInterval(window.saver);
+        await openFile('/Watching/Renamed.md');
+        currentEditor.setValue('# Renamed\nEdited in the browser');
+    });
+    await fs.writeFile(renamed, 'Edited outside the app');
+    await page.evaluate(async () => { await syncCurrentFile(); });
+    assert.equal(await fs.readFile(renamed, 'utf8'), 'Edited outside the app');
+    const conflicts = await snapshot(path.join(notes, 'Conflicts'));
+    assert.ok(Object.values(conflicts).includes('Edited in the browser'));
+    await page.waitForFunction(() => currentEditor.getValue() === '# Renamed\nEdited outside the app');
+    assert.match(await page.locator('#connection-notice').innerText(), /both versions are kept/);
+
+    await fs.unlink(renamed);
+    await fs.rmdir(watched);
+    await page.waitForFunction(() => !getMemFile('/Watching/Renamed.md'));
+    await assert.rejects(fs.stat(renamed), {code: 'ENOENT'});
+
+    // A browser draft survives reload while the backend is unavailable.
+    const context = page.context();
+    await context.route('**/notes/sync', route => route.abort());
+    await page.evaluate(async () => {
+        await write('/Offline.md', 'Draft saved while disconnected');
+        await write('/Cancelled.md', 'Never publish this deleted draft');
+        await remove('/Cancelled.md');
+        await moveFile('/moved/Renamed by header.md', '/Offline move.md');
+        await syncLocalFileWithServer('/Offline.md').catch(() => {});
+    });
+    await page.reload();
+    await page.waitForFunction(() => getMemFile('/Offline.md') && !isSyncingFiles);
+    assert.equal(await page.evaluate(() => read('/Offline.md')), 'Draft saved while disconnected');
+    await context.unroute('**/notes/sync');
+    await page.waitForFunction(() => server.initialized && !isSyncingFiles && !localDrafts['/Offline.md']);
+    assert.equal(await fs.readFile(path.join(notes, 'Offline.md'), 'utf8'), 'Draft saved while disconnected');
+    assert.equal(await fs.readFile(path.join(notes, 'Offline move.md'), 'utf8'), 'Edited content');
+    await assert.rejects(fs.stat(path.join(notes, 'moved/Renamed by header.md')), {code: 'ENOENT'});
+    await assert.rejects(fs.stat(path.join(notes, 'Cancelled.md')), {code: 'ENOENT'});
+}
+
 async function runCase(binary, browserType, volatile, empty) {
     const label = `${browserType.name()} / ${volatile ? 'forced memory' : 'default storage'} / ${empty ? 'empty' : 'existing'} folder`;
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'files-md-safety-'));
@@ -182,7 +245,7 @@ async function runCase(binary, browserType, volatile, empty) {
 
         // Exercise the original trigger: downloading files, then a blur sync.
         await Promise.all([
-            page.waitForResponse(response => response.url().endsWith('/syncFilenames')),
+            page.waitForResponse(response => response.url().endsWith('/notes/sync')),
             page.evaluate(() => window.dispatchEvent(new Event('blur'))),
         ]);
         await waitForSync(page);
@@ -211,7 +274,7 @@ async function runCase(binary, browserType, volatile, empty) {
         } else {
             const statuses = await page.evaluate(async () => ({
                 md: (await getFileStatus('/Original.md')).status,
-                txt: (await getFileStatus('/Plain.txt')).status,
+                txt: (await getFileStatus('/Plain.md')).status,
                 memory: (await getFileHandle('/Original.md')) instanceof MemFile,
             }));
             assert.equal(statuses.md, 'notModified');
@@ -246,11 +309,11 @@ async function runCase(binary, browserType, volatile, empty) {
             assert.ok(Object.values(backups).includes('Original content'));
 
             await page.evaluate(async () => {
-                await remove('/Plain.txt');
+                await remove('/Plain.md');
                 await syncFilesWithServer();
             });
-            await assert.rejects(fs.stat(path.join(notes, 'Plain.txt')), {code: 'ENOENT'});
-            assert.ok(Object.values(await snapshot(path.join(root, 'backups', 'Plain.txt'))).includes('Plain text content'));
+            await assert.rejects(fs.stat(path.join(notes, 'Plain.md')), {code: 'ENOENT'});
+            assert.ok(Object.values(await snapshot(path.join(root, 'backups', 'Plain.md'))).includes('Plain text content'));
 
             // A move must send its destination even when it is open in an editor.
             await page.evaluate(async () => {
@@ -306,6 +369,7 @@ async function runCase(binary, browserType, volatile, empty) {
             assert.equal(await fs.readFile(path.join(notes, 'moved/Renamed by header.md'), 'utf8'), 'Edited content');
             await assert.rejects(fs.stat(path.join(notes, 'moved/Original.md')), {code: 'ENOENT'});
         }
+        if (!empty) await verifyLiveChanges(page, notes);
         if (browserType === chromium && !volatile && !empty) await verifyFolderPicker(page);
         assert.deepEqual(errors, []);
         passed = true;

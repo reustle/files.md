@@ -38,7 +38,7 @@ async function init() {
                 method: 'POST',
                 credentials: 'include',
                 headers: {
-                    'X-FilesMD-Sync': '2',
+                    'X-FilesMD-Sync': SYNC_PROTOCOL_VERSION,
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
@@ -82,7 +82,6 @@ async function init() {
                 notice.hidden = false;
             }
         } catch (error) {
-            localStorage.removeItem(LAST_SERVER_OK_KEY);
             notice.textContent = 'Cannot connect to your notes server. Reload when the connection is available.';
             notice.hidden = false;
             logError('Session check failed:', error.message);
@@ -141,10 +140,11 @@ async function init() {
     }
 
     perf = performance.now();
-    await syncFilesWithServer();
+    await syncFilesWithServer().catch(error => logError('Initial sync:', error.message));
     await renderSidebar();
     await syncMediaFiles();
     log(`Files initialized in: ${(performance.now() - perf).toFixed(3)} milliseconds`);
+    startLocalNotesSync();
 
 }
 
@@ -643,7 +643,7 @@ async function post(endpoint, data) {
             method: 'POST',
             credentials: 'include',
             headers: {
-                'X-FilesMD-Sync': '2',
+                'X-FilesMD-Sync': SYNC_PROTOCOL_VERSION,
                 'Content-Type': 'application/json',
                 'Version': getCurrentVersion()
             },
@@ -884,6 +884,10 @@ window.addEventListener('popstate', (event) => {
 window.addEventListener('focus', async () => {
     // Firefox can focus the page while its scripts are still initializing.
     if (!window.currentEditor) return;
+    if (window.FILES_MD_LOCAL_SERVER) {
+        if (localNotesInitialized) await syncLocalNotes().catch(() => {});
+        return;
+    }
     // Clear any pending chat open timer.
     if (openChatIdleTimer) {
         clearTimeout(openChatIdleTimer);
@@ -926,6 +930,13 @@ window.addEventListener('focus', async () => {
 // Sync files on chat focus lose.
 window.addEventListener('blur', async function() {
     if (!window.currentEditor) return;
+    if (window.FILES_MD_LOCAL_SERVER) {
+        if (localNotesInitialized) {
+            await syncCurrentFile();
+            await syncLocalNotes().catch(() => {});
+        }
+        return;
+    }
     log('BLUR');
     editor.refresh();
 
