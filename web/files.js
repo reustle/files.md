@@ -853,7 +853,10 @@ async function getFileStatus(path) {
 
     const serverHash = serverFile.hash;
     const serverTime = serverFile.lastModified;
-    if (serverHash !== hash(content)) {
+    const contentMatches = window.FILES_MD_LOCAL_SERVER && isNotePath(path)
+        ? await matchesLocalBaseline(path, content, serverFile)
+        : serverHash === hash(content);
+    if (!contentMatches) {
         log('NEW MODIFIED LOCAL FILE ' + path);
         return {
             status: 'modified',
@@ -869,39 +872,10 @@ async function getFileStatus(path) {
     };
 }
 
-// TODO split into two, sometimes we need just compare
-async function isContentEqual(path, content) {
-    let fileHandle = await getFileHandle(path);
-    if (fileHandle === null) {
-        // TODO fix once Chromium fixes the bug
-        console.warn('Malformed name, skipping file...');
-        return false;
-    }
-
-    let file = await fileHandle.getFile()
-    let clientHash = hash(normNewLines(await file.text()));
-    let serverHash = hash(normNewLines(content));
-    if (clientHash !== serverHash) {
-        // Log string differences in content, not hash
-        const clientContent = normNewLines(await file.text());
-        const serverContent = normNewLines(content);
-        const clientLines = clientContent.split('\n');
-        const serverLines = serverContent.split('\n');
-        const diff = [];
-        for (let i = 0; i < Math.max(clientLines.length, serverLines.length); i++) {
-            const clientLine = clientLines[i] || '';
-            const serverLine = serverLines[i] || '';
-            if (clientLine !== serverLine) {
-                diff.push(`Line ${i + 1}: '${clientLine}' vs '${serverLine}'`);
-            }
-        }
-
-        // log(diff);
-
-        return false;
-    } else {
-        return true;
-    }
+async function isContentEqual(path, content, normalize = true) {
+    const file = await (await getFileHandle(path)).getFile();
+    const stored = await file.text();
+    return normalize ? normNewLines(stored) === normNewLines(content) : stored === content;
 }
 
 function getImageExtension(mimeType) {

@@ -235,6 +235,29 @@ async function verifyNestedFolders(page, notes) {
     await page.evaluate(async () => { currentEditor.markClean(); await openChat(); });
 }
 
+async function verifyExactContents(page, notes) {
+    const file = path.join(notes, 'Hash.md');
+    await fs.writeFile(file, 'Aa');
+    await page.waitForFunction(() => !isSyncingFiles && getMemFile('/Hash.md'));
+    const version = await page.evaluate(() => getServerFile('/Hash.md').version);
+    // Aa and BB collide under the old 32-bit hash. Disk updates still apply.
+    await fs.writeFile(file, 'BB');
+    await page.waitForFunction(version => !isSyncingFiles && getServerFile('/Hash.md').version !== version, version);
+    assert.equal(await page.evaluate(() => read('/Hash.md')), 'BB');
+    // Edits made directly to a browser folder must be detected as well.
+    await page.evaluate(async () => {
+        const writable = await (await getFileHandle('/Hash.md')).createWritable();
+        await writable.write('Aa');
+        await writable.close();
+        await syncFilesWithServer();
+    });
+    assert.equal(await fs.readFile(file, 'utf8'), 'Aa');
+    const nextVersion = await page.evaluate(() => getServerFile('/Hash.md').version);
+    await fs.writeFile(file, 'Line one\r\nLine two');
+    await page.waitForFunction(version => !isSyncingFiles && getServerFile('/Hash.md').version !== version, nextVersion);
+    assert.equal(await page.evaluate(() => read('/Hash.md')), 'Line one\r\nLine two');
+}
+
 async function verifyFolderOperations(page, notes) {
     await page.evaluate(async () => { await createDir('/New empty/nested'); await syncFilesWithServer(); });
     assert.equal((await fs.stat(path.join(notes, 'New empty/nested'))).isDirectory(), true);
@@ -468,6 +491,7 @@ async function runCase(binary, browserType, volatile, empty) {
             await verifyLiveChanges(page, notes);
             await verifyNestedFolders(page, notes);
             await verifyFolderOperations(page, notes);
+            await verifyExactContents(page, notes);
         }
         if (browserType === chromium && !volatile && !empty) await verifyFolderPicker(page);
         assert.deepEqual(errors, []);

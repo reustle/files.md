@@ -7,8 +7,22 @@ let localDirectoryChanges = JSON.parse(localStorage.getItem(LOCAL_DIRECTORY_KEY)
 let localNotesInitialized = false;
 let localSyncTimer = null;
 let localSyncFailed = false;
+const localBaselineContents = new Map();
 
 function isNotePath(path) { return /\.md$/i.test(path); }
+
+async function matchesLocalBaseline(path, content, baseline = getServerFile(path)) {
+    if (!baseline?.version) return false;
+    const known = localBaselineContents.get(path);
+    if (known?.version === baseline.version) return known.content === content;
+    // A fresh browser can compare its persisted content version. If the
+    // environment cannot verify it, preserve the local copy conservatively.
+    if (!globalThis.crypto?.subtle) return false;
+    const bytes = new TextEncoder().encode(content);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    const version = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    return version === baseline.version;
+}
 
 function persistLocalDrafts() {
     localStorage.setItem(LOCAL_DRAFT_KEY, JSON.stringify(localDrafts));
@@ -202,7 +216,7 @@ async function applyNotesSnapshot(snapshot, resolved) {
         const open = editorsForNote(path);
         const dirtyEditor = open.some(cm => !cm.isClean());
         const changedLocally = local !== undefined && local !== note.content &&
-            (baseline ? hash(local) !== baseline.hash : local !== '') && resolved.get(path) !== local;
+            (baseline ? !await matchesLocalBaseline(path, local, baseline) : local !== '') && resolved.get(path) !== local;
         if (dirtyEditor || changedLocally || localDrafts[path]) {
             if (changedLocally && !localDrafts[path]) stageLocalDraft(path, local, baseline?.version || 'unknown');
             continue;
@@ -212,6 +226,7 @@ async function applyNotesSnapshot(snapshot, resolved) {
             addMemFile(path, {isFile: true, path, handle: await getFileHandle(path), lastModified: note.lastModified, lastClientModified});
             setServerFile(path, note.content, note.lastModified, lastClientModified);
             getServerFile(path).version = note.version;
+            localBaselineContents.set(path, {content: note.content, version: note.version});
             for (const cm of open) {
                 if (!cm.isClean()) continue; // typing during the awaited file write
                 updateNoteEditor(cm, note.content, note.version);
@@ -228,13 +243,14 @@ async function applyNotesSnapshot(snapshot, resolved) {
         if (open.some(cm => !cm.isClean())) continue;
         if (await exists(path)) {
             const content = await read(path);
-            if (hash(content) !== baseline.hash && resolved.get(path) !== content) {
+            if (!await matchesLocalBaseline(path, content, baseline) && resolved.get(path) !== content) {
                 stageLocalDraft(path, content, baseline.version || 'unknown');
                 continue;
             }
             await remove(path, {syncDeletion: false});
         }
         removeServerFile(path);
+        localBaselineContents.delete(path);
         for (const cm of open) {
             cm.path = undefined;
             cm.setValue('');

@@ -89,8 +89,7 @@ async function writeIfContentIsDifferent(path, content, {stageDraft = true} = {}
         throw new Error('Invalid file name');
     }
 
-    const fileExists = !await exists(path);
-    if (fileExists || !await isContentEqual(path, content)) {
+    if (!await isContentEqual(path, content, !window.FILES_MD_LOCAL_SERVER)) {
         // TODO what if we're syncing first time and already have changes?
         log('Hashes do not match, writing file...', path);
         const writable = await fileHandle.createWritable();
