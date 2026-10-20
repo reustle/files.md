@@ -142,11 +142,16 @@ func IssueToken(w http.ResponseWriter, r *http.Request) {
 // TODO too harsh blocking, we may need to take into account proxies
 func tokenMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if config.ServerCfg.RequireSafeSync && r.Header.Get("X-FilesMD-Sync") != "2" {
+		if config.ServerCfg.RequireSafeSync && r.Header.Get("X-FilesMD-Sync") != "3" {
 			http.Error(w, "This server requires the updated sync client. Reload the app.", http.StatusConflict)
 			return
 		}
 		if config.ServerCfg.RequireSafeSync {
+			switch r.URL.Path {
+			case "/syncFilenames", "/syncFile", "/syncTexts", "/syncText":
+				http.Error(w, "Reload the app to use content-versioned notes sync", http.StatusConflict)
+				return
+			}
 			safeSyncMu.Lock()
 			defer safeSyncMu.Unlock()
 		}

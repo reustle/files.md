@@ -42,12 +42,20 @@ func main() {
 		panic("Backups must be outside the notes folder")
 	}
 	backend := &fs.VersionedOSFS{Fs: afero.NewOsFs(), Root: notes, BackupDir: backups}
+	rootInfo, err := os.Stat(notes)
+	if err != nil || !rootInfo.IsDir() {
+		panic("NOTES_DIR must be an existing directory")
+	}
 	if err := config.LoadBotConfig(); err != nil {
 		panic(err)
 	}
 	fs.NewUserFS = func(userID int64) (*fs.FS, error) {
 		if userID != 1 {
 			return nil, fmt.Errorf("unknown local user")
+		}
+		current, err := os.Stat(notes)
+		if err != nil || !os.SameFile(rootInfo, current) {
+			return nil, fmt.Errorf("notes directory is unavailable or was replaced")
 		}
 		return fs.NewFS(notes, backend, 0)
 	}

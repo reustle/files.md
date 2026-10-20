@@ -18,6 +18,11 @@ type VersionedOSFS struct {
 	Root, BackupDir string
 }
 
+func (v *VersionedOSFS) LstatIfPossible(name string) (os.FileInfo, bool, error) {
+	info, err := os.Lstat(name)
+	return info, true, err
+}
+
 func (v *VersionedOSFS) preserve(name string) error {
 	rel, err := filepath.Rel(v.Root, name)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
@@ -94,6 +99,9 @@ func (v *VersionedOSFS) Create(name string) (afero.File, error) {
 }
 
 func (v *VersionedOSFS) Remove(name string) error {
+	if strings.HasPrefix(filepath.Base(name), ".files-md-") {
+		return v.Fs.Remove(name)
+	}
 	if err := v.preserve(name); err != nil {
 		return err
 	}
@@ -105,8 +113,10 @@ func (v *VersionedOSFS) RemoveAll(name string) error {
 }
 
 func (v *VersionedOSFS) Rename(oldname, newname string) error {
-	if err := v.preserve(oldname); err != nil {
-		return err
+	if !strings.HasPrefix(filepath.Base(oldname), ".files-md-") {
+		if err := v.preserve(oldname); err != nil {
+			return err
+		}
 	}
 	if err := v.preserve(newname); err != nil {
 		return err

@@ -105,6 +105,7 @@ func router(serverLogger *log.Logger) *http.ServeMux {
 			fmt.Fprint(w, "window.FILES_MD_LOCAL_SERVER = true; localStorage.setItem('apiUrl', window.location.origin);")
 		})
 		r.HandleFunc("/session", SessionStatus)
+		r.HandleFunc("/notes/sync", corsMiddleware(panicMiddleware(tokenMiddleware(gzipMiddleware(SyncNotes)))))
 	}
 
 	// TODO add hashing or secrets
