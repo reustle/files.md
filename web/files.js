@@ -33,7 +33,6 @@ let isLoadingLocalFiles = false;
 // is not linked to the server. Unfortunately we can't just
 // check "token" cookie, because it is HttpOnly.
 const LAST_SERVER_OK_KEY = 'lastServerOk';
-const MAX_DIR_NESTING_LEVEL = 10;
 
 function markServerOk() {
     localStorage.setItem(LAST_SERVER_OK_KEY, Date.now().toString());
@@ -135,7 +134,7 @@ let mediaIndex = {};
 const SERVER_STORAGE_KEY = 'server-v2:' + API_URL;
 const pendingFileDeletes = new Map();
 const pendingFileMoves = new Map();
-const SUPPORTED_EXTENSIONS = ['md', 'txt', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'mp4', 'webm', 'mov', 'mp3', 'ogg', 'oga', 'weba', 'wav'];
+const SUPPORTED_EXTENSIONS = ['md', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'mp4', 'webm', 'mov', 'mp3', 'ogg', 'oga', 'weba', 'wav'];
 
 function isMediaPath(path) {
     return /\.(png|jpg|jpeg|gif|webp|mp4|webm|mov|mp3|ogg|oga|weba|wav)$/i.test(path);
@@ -149,12 +148,8 @@ async function loadLocalFiles(rootDirHandle, slowMode = false) {
     }
     isLoadingLocalFiles = true;
 
-    // TODO should we wait for editor2 as well?
-    // What if "isClean" is changed mid-through? We have awaits.
-    // Better check per/file right before loading?
-    while (!editor.isClean()) {
-        await new Promise(r => setTimeout(r, 50));
-    }
+    // Listing handles never changes editor contents. Waiting for a clean
+    // editor here can deadlock an autosave that is waiting for sync to finish.
 
     let newFiles = {};
     // Rebuild the filename->path image index from scratch on every load so
@@ -162,7 +157,7 @@ async function loadLocalFiles(rootDirHandle, slowMode = false) {
     mediaIndex = {};
 
     // Loads files recursively
-    async function loadDir(dirHandle, path = '/', depth = 0) {
+    async function loadDir(dirHandle, path = '/') {
         const entries = [];
         for await (const entry of dirHandle.values()) {
             entries.push(entry);
@@ -189,11 +184,11 @@ async function loadLocalFiles(rootDirHandle, slowMode = false) {
             }
 
             if (entry.kind === 'directory') {
-                if (filename.startsWith('.') || depth >= MAX_DIR_NESTING_LEVEL) continue;
+                if (filename.startsWith('.')) continue;
 
                 currentDir[filename + '/'] = {};
                 const dir = `${path}${filename}/`;
-                dirPromises.push({handle: entry, path: dir, depth: depth + 1});
+                dirPromises.push({handle: entry, path: dir});
             } else if (entry.kind === 'file' && (isSupportedExtension || isConfig)) {
                 // Reuse existing file handle if it exists
                 let existingDir = files;
@@ -206,15 +201,14 @@ async function loadLocalFiles(rootDirHandle, slowMode = false) {
                     existingDir = existingDir[dir];
                 }
 
-                const fileWasPreviouslyLoaded = existingDir && existingDir[filename] !== undefined
-                if (fileWasPreviouslyLoaded) {
-                    currentDir[filename] = existingDir[filename];
-                } else {
-                    currentDir[filename] = {path: `${path}${filename}`, isFile: true, handle: entry};
-                    entry.getFile().then(file => {
-                        currentDir[filename].lastModified = file.lastModified;
-                    });
-                }
+                const previous = existingDir?.[filename];
+                const file = await entry.getFile();
+                // Always use the freshly enumerated handle: editors and sync
+                // tools can replace files atomically, invalidating old handles.
+                currentDir[filename] = {
+                    ...previous, path: `${path}${filename}`, isFile: true,
+                    handle: entry, lastModified: file.lastModified,
+                };
 
                 if (!isMediaPath(filename)) {
                     continue
@@ -238,14 +232,14 @@ async function loadLocalFiles(rootDirHandle, slowMode = false) {
         if (debug) {
             if (!debug.loaded) {
                 debug.loaded = true
-                await loadDir(rootDirHandle, debug.dir, 1);
+                await loadDir(rootDirHandle, debug.dir);
             }
             return;
         }
 
         if (!slowMode) {
-            await Promise.all(dirPromises.map(({handle, path, depth}) =>
-                loadDir(handle, path, depth)
+            await Promise.all(dirPromises.map(({handle, path}) =>
+                loadDir(handle, path)
             ));
             return;
         }
@@ -253,8 +247,8 @@ async function loadLocalFiles(rootDirHandle, slowMode = false) {
         const batchSize = 6;
         for (let i = 0; i < dirPromises.length; i += batchSize) {
             const batch = dirPromises.slice(i, i + batchSize);
-            await Promise.all(batch.map(({handle, path, depth}) =>
-                loadDir(handle, path, depth)
+            await Promise.all(batch.map(({handle, path}) =>
+                loadDir(handle, path)
             ));
             await new Promise(r => setTimeout(r, 0));
         }

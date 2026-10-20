@@ -74,7 +74,7 @@ Auto-generated yearly habit tracking summaries.
 Images referenced in notes via standard Markdown: `![](media/photo.jpg)`
 
 ## Conventions
-- One level of directory nesting only
+- Notes may be nested in directories at any depth; preserve the full path in navigation and sync.
 - Filenames are capitalized: `My note.md`, not `my note.md`
 - Links between notes use default markdown syntax: `[Note Title](Note path)`
 - Supported file extensions: .md, .png, .jpg, .jpeg, .webp, .gif

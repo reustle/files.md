@@ -1,4 +1,21 @@
 let tree;
+function sidebarStateKey() { return 'sidebar-expanded:' + API_URL; }
+
+function saveSidebarExpandedDirs() {
+    if (!tree) return;
+    // A memory-only browser initially renders an empty tree while downloading.
+    // Keep state for folders that have not arrived yet.
+    const paths = new Set(JSON.parse(localStorage.getItem(sidebarStateKey()) || '[]'));
+    function visit(node) {
+        if (!node.isLeaf()) {
+            if (node.isExpanded()) paths.add(node.path);
+            else paths.delete(node.path);
+        }
+        node.getChildren().forEach(visit);
+    }
+    tree.getRoot().getChildren().forEach(visit);
+    localStorage.setItem(sidebarStateKey(), JSON.stringify([...paths]));
+}
 
 function selectSidebarItem(path) {
     if (!tree) return;
@@ -17,23 +34,30 @@ function selectSidebarItem(path) {
     }
     clear(tree.getRoot());
     const node = find(tree.getRoot());
-    if (node) node.setSelected(true);
+    if (node) {
+        node.setSelected(true);
+        for (let parent = node.parent; parent; parent = parent.parent) parent.setExpanded(true);
+        saveSidebarExpandedDirs();
+    }
     tree.reload();
 }
 
 function renderSidebar(focusDir = '', modifiedPaths) {
-    let expandedDirs = new Set();
+    let expandedDirs = new Set(JSON.parse(localStorage.getItem(sidebarStateKey()) || '[]'));
+    const focusPath = focusDir ? '/' + focusDir.replace(/^\/+|\/+$/g, '') : '';
+
     let selectedNodes = new Set();
 
-    // TODO save state
     if (tree) {
         // Save state for all nodes (both directories and files)
         function saveNodeState(node) {
             if (node.isExpanded()) {
-                expandedDirs.add(node.toString());
+                expandedDirs.add(node.path);
+            } else {
+                expandedDirs.delete(node.path);
             }
             if (node.isSelected()) {
-                selectedNodes.add(node.toString());
+                selectedNodes.add(node.path);
             }
 
             // Recursively save state for child nodes
@@ -105,15 +129,17 @@ function renderSidebar(focusDir = '', modifiedPaths) {
 
         // Handle focus directory or restore previous state
         let dir = toFilename(path);
-        if (dir === focusDir) {
+        if (dirNode.path === focusPath || focusPath.startsWith(dirNode.path + '/')) {
             dirNode.setExpanded(true);
             dirNode.setSelected(true);
         } else {
-            if (expandedDirs.has(dir)) dirNode.setExpanded(true);
-            if (selectedNodes.has(dir)) dirNode.setSelected(true);
+            if (expandedDirs.has(dirNode.path)) dirNode.setExpanded(true);
+            if (selectedNodes.has(dirNode.path)) dirNode.setSelected(true);
         }
 
-        if (modifiedPaths !== undefined && modifiedPaths.some(modPath => toRootDirName(modPath) === dir)) {
+        dirNode.on('toggle_expanded', saveSidebarExpandedDirs);
+
+        if (modifiedPaths !== undefined && modifiedPaths.some(modPath => modPath.startsWith(dirNode.path + '/'))) {
             dirNode.shouldBlink = true;
         }
     });
@@ -276,7 +302,7 @@ function renderSidebar(focusDir = '', modifiedPaths) {
 
         // Sidebar only lists .md files. Images, logs and other formats
         // can sit in OPFS but cluttering the sidebar with them is noise.
-        if (!toFilename(path).endsWith('.md')) {
+        if (!/\.md$/i.test(toFilename(path))) {
             return;
         }
 
@@ -294,7 +320,7 @@ function renderSidebar(focusDir = '', modifiedPaths) {
     for (const path of fileEntries) {
         const {dirPath, filename} = toDirPathAndFilename(path);
 
-        let fileNode = new TreeNode(filename.replace(/\.md$/, '').replace(/\.txt$/, ''), {expanded: false});
+        let fileNode = new TreeNode(filename.replace(/\.md$/i, ''), {expanded: false});
         fileNode.path = path;
         fileNode.on('click', async function (n, node) {
             await openFile(path);
@@ -592,7 +618,7 @@ function TreeNode(userObject, options) {
 
     this.equals = function (node) {
         if (node instanceof TreeNode) {
-            if (node.getUserObject() == userObject) {
+            if (node === this) {
                 return true;
             }
         }
@@ -1121,7 +1147,8 @@ function TreeView(root, container, options) {
                 ret += '<span class="tree-icon">' + TreeConfig.leaf_icon + '</span>';
             }
 
-            span_desc.innerHTML = ret + name + "</span>";
+            span_desc.innerHTML = ret;
+            span_desc.appendChild(document.createTextNode(name));
             span_desc.classList.add("tree-leaf");
             if (node.toString() === 'chat') {
                 span_desc.classList.add("sidebar-chat");
@@ -1155,7 +1182,8 @@ function TreeView(root, container, options) {
                 ret += '<span class="tree-icon">' + TreeConfig.parent_icon + '</span>';
             }
 
-            span_desc.innerHTML = ret + node.toString() + '</span>';
+            span_desc.innerHTML = ret;
+            span_desc.appendChild(document.createTextNode(node.toString()));
 
             li_outer.appendChild(span_desc);
 

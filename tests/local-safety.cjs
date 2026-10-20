@@ -180,6 +180,59 @@ async function verifyLiveChanges(page, notes) {
     await assert.rejects(fs.stat(path.join(notes, 'Cancelled.md')), {code: 'ENOENT'});
 }
 
+async function verifyNestedFolders(page, notes) {
+    const deep = Array.from({length: 14}, (_, i) => `Level ${i + 1}`).join('/') + '/Deep.md';
+    for (const name of [deep, 'Projects/Shared/One.md', 'Archive/Shared/Two.md', '<b>literal/Note.md']) {
+        await fs.mkdir(path.dirname(path.join(notes, name)), {recursive: true});
+        await fs.writeFile(path.join(notes, name), 'Nested note content');
+    }
+    await fs.mkdir(path.join(notes, 'Empty from disk'));
+    await page.waitForFunction(deep => !isSyncingFiles && getMemFile('/' + deep), deep);
+    const result = await page.evaluate(async deep => {
+        files = await loadLocalFiles(await getRootDirHandle());
+        renderSidebar();
+        function find(path, node = tree.getRoot()) {
+            if (node.path === path) return node;
+            for (const child of node.getChildren()) {
+                const found = find(path, child);
+                if (found) return found;
+            }
+        }
+        find('/Projects').setExpanded(true);
+        find('/Projects/Shared').setExpanded(true);
+        find('/Archive').setExpanded(true);
+        find('/Archive/Shared').setExpanded(false);
+        renderSidebar();
+        const separate = find('/Projects/Shared').isExpanded() && !find('/Archive/Shared').isExpanded();
+        await openFile('/' + deep);
+        const parents = [];
+        for (let node = find('/' + deep).parent; node.path !== '/'; node = node.parent) {
+            parents.push({path: node.path, expanded: node.isExpanded()});
+        }
+        return {separate, parents, empty: !!find('/Empty from disk')};
+    }, deep);
+    assert.equal(result.separate, true, 'Repeated folder names must have independent state');
+    assert.equal(result.empty, true);
+    assert.equal(result.parents.length, 14);
+    assert.ok(result.parents.every(node => node.expanded));
+    assert.match(await page.locator('#tree').innerText(), /Deep/);
+    assert.equal(await page.locator('#tree b').count(), 0, 'Folder names are text, not HTML');
+    await page.reload();
+    await waitForSync(page);
+    assert.match(await page.locator('#tree').innerText(), /Deep/, 'Expanded ancestors must survive reload');
+    assert.match(await page.locator('#tree').innerText(), /One/);
+    assert.doesNotMatch(await page.locator('#tree').innerText(), /Two/);
+    await page.evaluate(async deep => {
+        clearInterval(window.saver);
+        await openFile('/' + deep);
+        currentEditor.replaceRange('Edited ', {line: 1, ch: 0});
+        await loadLocalFiles(await getRootDirHandle()); // A dirty editor must not block directory scans.
+        await syncCurrentFile();
+    }, deep);
+    assert.equal(await fs.readFile(path.join(notes, deep), 'utf8'), 'Edited Nested note content');
+    await page.evaluate(async () => { currentEditor.markClean(); await openChat(); });
+}
+
 async function runCase(binary, browserType, volatile, empty) {
     const label = `${browserType.name()} / ${volatile ? 'forced memory' : 'default storage'} / ${empty ? 'empty' : 'existing'} folder`;
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'files-md-safety-'));
@@ -369,7 +422,10 @@ async function runCase(binary, browserType, volatile, empty) {
             assert.equal(await fs.readFile(path.join(notes, 'moved/Renamed by header.md'), 'utf8'), 'Edited content');
             await assert.rejects(fs.stat(path.join(notes, 'moved/Original.md')), {code: 'ENOENT'});
         }
-        if (!empty) await verifyLiveChanges(page, notes);
+        if (!empty) {
+            await verifyLiveChanges(page, notes);
+            await verifyNestedFolders(page, notes);
+        }
         if (browserType === chromium && !volatile && !empty) await verifyFolderPicker(page);
         assert.deepEqual(errors, []);
         passed = true;

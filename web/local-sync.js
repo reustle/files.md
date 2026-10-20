@@ -162,7 +162,11 @@ async function applyNotesSnapshot(snapshot, resolved) {
     const changed = [];
     for (const dir of snapshot.directories) {
         let handle = await getRootDirHandle();
-        for (const part of dir.split('/')) handle = await handle.getDirectoryHandle(part, {create: true});
+        let entries = files;
+        for (const part of dir.split('/')) {
+            handle = await handle.getDirectoryHandle(part, {create: true});
+            entries = entries[part + '/'] ||= {};
+        }
     }
     for (const note of Object.values(snapshot.files)) {
         const path = '/' + note.path;
