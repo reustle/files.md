@@ -130,8 +130,11 @@ let server = {files: {}, media: {}, timestamps: {}, mediaTimestamp: 0}; // In-me
 // image lives in a folder other than media.
 let mediaIndex = {};
 
-const SERVER_STORAGE_KEY = 'server'; // If scheme is migrated, I believe it's better to introduce a new key, because for now old keys aren't removed.
-const SUPPORTED_EXTENSIONS = ['md', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'mp4', 'webm', 'mov', 'mp3', 'ogg', 'oga', 'weba', 'wav'];
+// A new snapshot namespace prevents reuse of unsafe pre-v2 browser metadata.
+const SERVER_STORAGE_KEY = 'server-v2:' + API_URL;
+const pendingFileDeletes = new Map();
+const pendingFileMoves = new Map();
+const SUPPORTED_EXTENSIONS = ['md', 'txt', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'mp4', 'webm', 'mov', 'mp3', 'ogg', 'oga', 'weba', 'wav'];
 
 function isMediaPath(path) {
     return /\.(png|jpg|jpeg|gif|webp|mp4|webm|mov|mp3|ogg|oga|weba|wav)$/i.test(path);
@@ -282,16 +285,23 @@ async function syncFilesWithServer() {
     if (!hasLastServerOk()) {
         return;
     }
-    if (files === undefined || Object.keys(files).length === 0) {
+    if (files === undefined) {
         return;
     }
     if (debug) {
         return;
     }
 
-    if (isSyncingFiles) return;
+    while (isSyncingFiles) await new Promise(resolve => setTimeout(resolve, 25));
     isSyncingFiles = true;
+    try {
+        return await syncFilesWithServerOnce();
+    } finally {
+        isSyncingFiles = false;
+    }
+}
 
+async function syncFilesWithServerOnce() {
     const startTime = performance.now();
     log('Starting sync with server...');
 
@@ -300,9 +310,7 @@ async function syncFilesWithServer() {
 
     let modified = [];
     let deleted = [];
-    // TODO is it possible that the server has zero files? I think at least '.' is sent
-    let hasFullySyncedFilesAtLeastOnce = server['timestamps'] !== undefined && Object.keys(server['timestamps']).length > 0;
-    ;
+    const hasFullySyncedFilesAtLeastOnce = server.initialized === true;
     if (hasFullySyncedFilesAtLeastOnce) {
         log('SYNCED AT LEAST ONCE, collecting local files', server['timestamps']);
         ({modified, deleted} = await collectModifiedAndDeletedFiles());
@@ -312,18 +320,20 @@ async function syncFilesWithServer() {
     const { json: response, error } = await post('syncFilenames', {
         modified: modified,
         deleted: deleted,
+        deletedVersions: Object.fromEntries(deleted.map(path => [path, pendingFileDeletes.get(path)])),
         timestamps: server['timestamps'] || [],
         serverTime: server['serverTime'] || 0,
     });
     if (error) {
         logError('syncFilenames failed:', error);
-        isSyncingFiles = false;
         return;
     }
 
     // Remove info about server files on client
     for (const path of deleted) {
         removeServerFile(path);
+        pendingFileDeletes.delete(path);
+        pendingFileMoves.delete(path);
     }
 
     try {
@@ -339,6 +349,14 @@ async function syncFilesWithServer() {
             // TODO if we skip current, don't take it's timestamp? We had a bug when sync was broken for 1 file
             // TODO fix missing / for root files
             if (path === editor.path || path === editor2.path) {
+                // A moved open file can be uploaded by this batch. Remember its
+                // acknowledged version so a subsequent move has a real baseline.
+                // Do not mark unseen server changes as read by the editor.
+                const sent = modified.find(file => file.path === path);
+                if (sent && sent.content === content) {
+                    setServerFile(path, content, lastModified);
+                    saveServerFiles();
+                }
                 log('Skip receiving current file during bath sync', path);
                 continue;
             }
@@ -363,7 +381,7 @@ async function syncFilesWithServer() {
                     const oldPath = joinPath('/', response.renames[relPath]);
                     try {
                         log('DELETED due to renaming', oldPath);
-                        await remove(oldPath);
+                        await remove(oldPath, {syncDeletion: false});
                     } catch (err) {
                         log('RENAME: cant remove file: ', err, path);
                     }
@@ -406,6 +424,7 @@ async function syncFilesWithServer() {
         if (!failedAtLeastOnce) {
             log('BATCH sync ok, moving timestamps');
             server['timestamps'] = response.timestamps;
+            server.initialized = true;
             saveServerFiles();
         } else {
             log("BATCH sync error, timestamps aren't moved");
@@ -416,7 +435,6 @@ async function syncFilesWithServer() {
 
     log('Sync completed in ' + (performance.now() - startTime) + 'ms');
 
-    isSyncingFiles = false;
 }
 
 async function syncLocalFileWithServer(path) {
@@ -565,6 +583,7 @@ async function syncMediaFiles() {
                     credentials: 'include',
                     headers: {
                         'Content-Type': 'application/json',
+                        'X-FilesMD-Sync': '2',
                         'Version': getCurrentVersion(),
                     },
                     body: JSON.stringify({
@@ -613,6 +632,7 @@ async function syncMediaFiles() {
                     credentials: 'include',
                     headers: {
                         'Content-Type': 'application/json',
+                        'X-FilesMD-Sync': '2',
                     },
                     body: JSON.stringify({
                         filename: filename,
@@ -703,12 +723,12 @@ async function saveMediaFile(path, blob, lastModified) {
 // TODO rename textFiles?
 async function collectModifiedAndDeletedFiles() {
     const modifiedFiles = [];
-    const existingFiles = {};
     const promises = [];
 
     // Freeze paths to prevent RC. Current file can change during collecting.
     const editorPath = editor.path;
     const editor2Path = editor2.path;
+    const moveTargets = new Set(pendingFileMoves.values());
     log('Frozen paths:', editorPath, editor2Path);
     walk(files, (path, isFile) => {
         if (!isFile) {
@@ -727,7 +747,7 @@ async function collectModifiedAndDeletedFiles() {
         }
 
         // TODO write tests for that?
-        if (path === editorPath || path === editor2Path) {
+        if ((path === editorPath || path === editor2Path) && !moveTargets.has(path)) {
             log('Skip sending current file: ' + path);
             return;
         }
@@ -738,10 +758,8 @@ async function collectModifiedAndDeletedFiles() {
                     modifiedFiles.push(result);
                 }
 
-                if (result.status !== 'error') {
-                    existingFiles[result.path] = true;
-                } else {
-                    console.warn(`Error getting status for file ${path}:`, result);
+                if (result.status === 'error') {
+                    throw new Error(`Cannot read ${path}; sync aborted before sending changes`);
                 }
             });
         promises.push(promise);
@@ -749,40 +767,27 @@ async function collectModifiedAndDeletedFiles() {
 
     await Promise.all(promises);
 
-    // Find deleted files that are in server files but not in existing files.
-    let deleted = [];
-    walk(server.files, (path, isFile) => {
-        if (!isFile) {
-            return;
+    // A move must include its destination even if a reload omitted that entry
+    // from the browser's file list. Never delete the source on a failed read.
+    for (const target of moveTargets) {
+        if (modifiedFiles.some(file => file.path === target)) continue;
+        const result = await getFileStatus(target);
+        if (result.status === 'error') {
+            throw new Error(`Cannot read move destination ${target}; sync aborted`);
         }
+        if (result.status === 'new' || result.status === 'modified') modifiedFiles.push(result);
+    }
 
-        // Chromium doesn't support those chars on any OS
-        if (/[<>:'|?*\\/\x00-\x1F\x7F]/.test(toFilename(path))) {
-            return;
-        }
-
-        // Skip current files.
-        if (path === editorPath || path === editor2Path) {
-            return;
-        }
-
-        if (existingFiles[path] === undefined) {
-            log('DELETED because not in existing or modified files:', path);
-            log('Current editors paths:', editor.path, editor2.path);
-            // Log files entry
-            log('Mem file:', getMemFile(path));
+    // Absence from a browser mirror is not a deletion: memory can disappear,
+    // loading can fail, and a file may be unsupported. Only user actions queue it.
+    const deleted = [];
+    for (const [path] of pendingFileDeletes) {
+        if (await exists(path)) {
+            pendingFileDeletes.delete(path);
+            pendingFileMoves.delete(path);
+        } else {
             deleted.push(path);
         }
-    });
-
-    // If there are too many deleted files, prob something is wrong, throw an alert
-    if (deleted.length > 20) {
-        alert(`Trying to delete more than 20 deleted files during sync (${deleted.length}). I won't proceed, please resolve the issue manually. Probably "files" is empty in local stroage for some reason, but there are actual files on the disk.`);
-        // Show first 10 files
-        alert('First 10 files: \n' + deleted.slice(0, 10).join('\n'));
-        localStorage.removeItem("server");
-        throw new Error('Too many deleted files during sync, aborting.');
-        deleted = [];
     }
 
     return {
@@ -816,17 +821,17 @@ async function getFileStatus(path) {
         const memFile = getMemFile(path);
         let fileHandle = memFile?.handle;
         // First try to get the file from memory, if not found try to open from local fs.
-        if (!(fileHandle instanceof FileSystemFileHandle)) {
+        if (!fileHandle || typeof fileHandle.getFile !== 'function') {
             fileHandle = await getFileHandle(path, false);
         }
-        if (!(fileHandle instanceof FileSystemFileHandle)) {
+        if (!fileHandle || typeof fileHandle.getFile !== 'function') {
             logError("Error while getting file handle for status check", path);
             return {
                 status: 'error',
             }
         }
 
-        const file = await memFile.handle.getFile();
+        const file = await fileHandle.getFile();
         content = await file.text();
     } catch (error) {
         logError('Error while getting status for file', path, error);
@@ -949,10 +954,7 @@ async function moveCurrentFile(toDir) {
         });
 
         currentEditor.path = newPath;
-        setServerFile(newPath, content, 0);
-        saveServerFiles();
-
-        await remove(oldPath);
+        await remove(oldPath, {moveTo: newPath});
         await renderSidebar();
     } catch (error) {
         logError('Error moving file:', error);
@@ -1015,8 +1017,9 @@ async function moveFile(oldPath, newPath) {
         // receives newPath. Leaving serverFile null lets the sync see
         // it as 'new' and push it normally.
 
-        // Server file will be removed here.
-        await remove(oldPath);
+        // Keep the destination in the same batch as the source deletion,
+        // including when the moved file is open in an editor.
+        await remove(oldPath, {moveTo: newPath});
         // delete files[oldDir][oldFilename];
         await renderSidebar();
 
@@ -1024,6 +1027,13 @@ async function moveFile(oldPath, newPath) {
     } catch (error) {
         logError('Error moving file:', error);
     }
+}
+
+function recordFileMove(oldPath, newPath) {
+    for (const [source, target] of pendingFileMoves) {
+        if (target === oldPath) pendingFileMoves.set(source, newPath);
+    }
+    if (pendingFileDeletes.has(oldPath)) pendingFileMoves.set(oldPath, newPath);
 }
 
 // Returns server file or null if not found.
@@ -1265,13 +1275,13 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
 // If currentEditor is changed during the execution of this function, we'll have RC.
 // So, wherever we change currentEditor reference, we should lock via isMessingWithCurrentEditor.
 async function syncCurrentFile(switchAwayEditor = false) {
-    if (files === undefined || debug || currentEditor.path === undefined) {
+    if (files === undefined || debug || !window.currentEditor || currentEditor.path === undefined) {
         return;
     }
 
     // Skip sync if we don't have a saved dir
     const savedDirHandle = await getRootDirHandle();
-    const hasSavedDir = savedDirHandle instanceof FileSystemDirectoryHandle;
+    const hasSavedDir = typeof FileSystemDirectoryHandle !== 'undefined' && savedDirHandle instanceof FileSystemDirectoryHandle;
     if (!hasSavedDir && !isMemFS) {
         return;
     }
@@ -1405,12 +1415,15 @@ async function syncCurrentFile(switchAwayEditor = false) {
             // Change the file immediately, because on further await calls it can be synced by syncTexts.
             currentEditor.path = newPath;
 
-            // 1. Remove file with old filename
-            // 2. Create file with new filename
-
-            // TODO every await means we can can have RC due to editor content change
-            await remove(path);
-            log('Removed due to filename change', path);
+            // Save the full destination before removing the source. Merely
+            // creating an empty handle is not evidence that writing succeeded.
+            content = getCurrentContent();
+            try {
+                await writeIfContentIsDifferent(newPath, content);
+            } catch (error) {
+                currentEditor.path = path;
+                throw error;
+            }
 
             addMemFile(newPath, {
                 isFile: true,
@@ -1419,9 +1432,7 @@ async function syncCurrentFile(switchAwayEditor = false) {
                 path: newPath,
                 handle: newHandle,
             });
-            await writeIfContentIsDifferent(newPath, getCurrentContent());
-            setServerFile(newPath, content, 0);
-            saveServerFiles();
+            await remove(path, {moveTo: newPath});
             log('Created', newPath);
 
             await renderSidebar();

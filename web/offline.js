@@ -48,6 +48,7 @@ const urlsToCache = [
     '/lib/md.js',
     '/app.js',
     '/welcome.js',
+    '/server-config.js',
     '/files.js',
     '/editor.js',
     '/chat.js',

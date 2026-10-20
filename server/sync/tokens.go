@@ -35,6 +35,8 @@ var (
 	mu            sync.RWMutex
 )
 
+var safeSyncMu sync.Mutex
+
 var blockedIPs = make(map[string]time.Time)
 var blockedIPsMutex sync.RWMutex
 
@@ -88,6 +90,23 @@ func setAuthCookie(w http.ResponseWriter, token string) {
 	})
 }
 
+// SessionStatus lets a fresh browser origin discover an existing login cookie.
+// Opening the app without a cookie is normal; this read-only probe must not
+// trigger the sync middleware's invalid-token IP ban.
+func SessionStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	authenticated := false
+	if cookie, err := r.Cookie(AuthCookieName); err == nil && cookie.Value != "" {
+		_, authenticated = findUserID(cookie.Value)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"authenticated": authenticated})
+}
+
 func IssueToken(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -123,6 +142,14 @@ func IssueToken(w http.ResponseWriter, r *http.Request) {
 // TODO too harsh blocking, we may need to take into account proxies
 func tokenMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if config.ServerCfg.RequireSafeSync && r.Header.Get("X-FilesMD-Sync") != "2" {
+			http.Error(w, "This server requires the updated sync client. Reload the app.", http.StatusConflict)
+			return
+		}
+		if config.ServerCfg.RequireSafeSync {
+			safeSyncMu.Lock()
+			defer safeSyncMu.Unlock()
+		}
 		ip := getIPFromRemoteAddr(r.RemoteAddr)
 
 		blockedIPsMutex.RLock()

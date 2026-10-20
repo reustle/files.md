@@ -38,10 +38,11 @@ type file struct {
 }
 
 type syncRequest struct {
-	Modified   []file           `json:"modified"` // New or modified files from client
-	Deleted    []string         `json:"deleted"`  // Deleted files from client
-	Timestamps map[string]int64 `json:"timestamps"`
-	ServerTime int64            `json:"serverTime"` // latest server-event ts the client has acknowledged; server returns events newer than this
+	DeletedVersions map[string]int64 `json:"deletedVersions"`
+	Modified        []file           `json:"modified"` // New or modified files from client
+	Deleted         []string         `json:"deleted"`  // Deleted files from client
+	Timestamps      map[string]int64 `json:"timestamps"`
+	ServerTime      int64            `json:"serverTime"` // latest server-event ts the client has acknowledged; server returns events newer than this
 }
 
 type syncResponse struct {
@@ -83,20 +84,19 @@ func SyncFilenames(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete files.
-	for _, path := range request.Deleted {
-		// Paths that are coming from client start with /, make them relative
-		path = strings.TrimPrefix(path, "/")
-		err = userFS.Del(fs.DirUserRoot, path)
-		if err != nil {
+	// Validate every requested deletion before performing any mutation.
+	if config.ServerCfg.RequireSafeSync {
+		for _, path := range request.Deleted {
+			current, err := userFS.Mtime(fs.DirUserRoot, strings.TrimPrefix(path, "/"))
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			slog.Error("Sync error: syncTexts: error deleting file", "path", path, "error", err)
-			continue
+			baseline := request.DeletedVersions[path]
+			if err != nil || baseline == 0 || current != baseline {
+				http.Error(w, "Deletion refused: file changed or explicit deletion baseline is missing", http.StatusConflict)
+				return
+			}
 		}
-		logSync(fmt.Sprintf("❌ Sync texts: deleting file: '%s'", path), r)
-		debugLogDelete(fmt.Sprintf("Deleting file: '%s'", path), r)
 	}
 
 	// TODO using rename log first replace old paths in client request to new so other code will work okay
@@ -143,8 +143,8 @@ func SyncFilenames(w http.ResponseWriter, r *http.Request) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			slog.Error("Sync error: syncTexts: error reading file", "path", path, "error", err)
 			logSync(fmt.Sprintf("Sync texts: error reading file '%s': %v", path, err), r)
-			// TODO All-or-nothing sync?
-			continue
+			http.Error(w, "Failed to read file; deletions not applied", http.StatusInternalServerError)
+			return
 		} else if errors.Is(err, os.ErrNotExist) {
 			logSync(fmt.Sprintf("Sync texts: creating: '%s'", path), r)
 			clientContent = clientFile.Content
@@ -156,7 +156,8 @@ func SyncFilenames(w http.ResponseWriter, r *http.Request) {
 				serverContent, err := userFS.Read(fs.DirUserRoot, relativePath)
 				if err != nil {
 					slog.Error("Sync error: syncTexts: error reading modified on server file '%s': %v", path, err)
-					continue
+					http.Error(w, "Failed to read file; deletions not applied", http.StatusInternalServerError)
+					return
 				}
 				logSync(fmt.Sprintf("🔀 Sync texts: Merging and writing: '%s'", path), r)
 				clientContent = Merge(serverContent, clientFile.Content)
@@ -182,12 +183,30 @@ func SyncFilenames(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Error("Sync error: syncTexts: error writing file '%s': %v", path, err)
 			logSync(fmt.Sprintf("Sync texts: error writing file '%s': %v", path, err), r)
-			continue
+			http.Error(w, "Failed to write file; deletions not applied", http.StatusInternalServerError)
+			return
 		}
 
 		if relativePath == fs.ChatFilename {
 			OnChatUpdate(userID(r))
 		}
+	}
+
+	// Delete files.
+	for _, path := range request.Deleted {
+		// Paths that are coming from client start with /, make them relative
+		path = strings.TrimPrefix(path, "/")
+		err = userFS.Del(fs.DirUserRoot, path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			slog.Error("Sync error: syncTexts: error deleting file", "path", path, "error", err)
+			http.Error(w, "Failed to back up or delete file", http.StatusInternalServerError)
+			return
+		}
+		logSync(fmt.Sprintf("❌ Sync texts: deleting file: '%s'", path), r)
+		debugLogDelete(fmt.Sprintf("Deleting file: '%s'", path), r)
 	}
 
 	// Based on known client dirs timestamps, send newly updated or created files.

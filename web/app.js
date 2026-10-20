@@ -22,8 +22,10 @@ async function init() {
     // sites; otherwise resolves false and we run on best-effort storage.
     // Idempotent - safe to call on every load.
     if (navigator.storage && navigator.storage.persist) {
-        const persisted = await navigator.storage.persist();
-        log('Storage persisted:', persisted);
+        // Firefox may wait for a permission decision; it must not block login.
+        navigator.storage.persist()
+            .then(persisted => log('Storage persisted:', persisted))
+            .catch(error => logError('Storage persistence request failed:', error.message));
     }
 
     // Authorize if we have one-time token in URL.
@@ -36,6 +38,7 @@ async function init() {
                 method: 'POST',
                 credentials: 'include',
                 headers: {
+                    'X-FilesMD-Sync': '2',
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
@@ -59,8 +62,35 @@ async function init() {
         }
     }
 
+    if (window.FILES_MD_LOCAL_SERVER) {
+        // Cookies survive a port change, but localStorage does not. Discover
+        // the real session instead of silently skipping the initial download.
+        const notice = document.getElementById('connection-notice');
+        try {
+            const response = await fetch(`${API_URL}/session`, {
+                credentials: 'include',
+                cache: 'no-store',
+            });
+            if (!response.ok) throw new Error(`Session check failed: ${response.status}`);
+            const session = await response.json();
+            if (session.authenticated) {
+                markServerOk();
+                notice.hidden = true;
+            } else {
+                localStorage.removeItem(LAST_SERVER_OK_KEY);
+                notice.textContent = 'Sign in to load your notes. Open your sign-in link to connect to your notes folder.';
+                notice.hidden = false;
+            }
+        } catch (error) {
+            localStorage.removeItem(LAST_SERVER_OK_KEY);
+            notice.textContent = 'Cannot connect to your notes server. Reload when the connection is available.';
+            notice.hidden = false;
+            logError('Session check failed:', error.message);
+        }
+    }
+
     const savedDirHandle = await getSavedRootDirHandle();
-    const hasSavedLocalDir = savedDirHandle instanceof FileSystemDirectoryHandle;
+    const hasSavedLocalDir = typeof FileSystemDirectoryHandle !== 'undefined' && savedDirHandle instanceof FileSystemDirectoryHandle;
     if (hasSavedLocalDir) {
         isMemFS = false;
         document.getElementById('open-folder').style.display = 'none';
@@ -303,14 +333,14 @@ async function openDir() {
     }
     isSyncingFiles = true
 
-    // New folder would miss files that were synced from server before,
-    // into a previous folder. That would send a signal to server "client has deleted some files".
-    // Which we do not want, so we clean our server files "understanding".
+    // A new folder needs a fresh server download. Pending actions belong to
+    // the previous folder and must not be carried into this one.
     server = {files: {}, media: {}, timestamps: {}, mediaTimestamp: 0};
-    localStorage.removeItem("server");
+    localStorage.removeItem(SERVER_STORAGE_KEY);
+    pendingFileDeletes.clear();
+    pendingFileMoves.clear();
 
     await saveDirectoryHandle(dirHandle);
-    await write('/Help.md', getHelpContent());
 
     // Copy user-created files from the temporary FS into the opened folder.
     try {
@@ -447,14 +477,12 @@ async function removeSavedRootDirHandle() {
 
 async function getRootDirHandle() {
     const savedDirHandle = await getSavedRootDirHandle();
-    // If the saved handle is from a browser missing createWritable or
-    // remove (Safari OPFS, older Chromium), fall back to the in-memory FS
-    // instead of letting later writes/deletes blow up.
-    if (!(savedDirHandle instanceof FileSystemDirectoryHandle) || !opfsIsFullyUsable()) {
-        return await getTemporaryStorageDirHandle();
+    // A selected folder is authoritative. Never silently substitute the demo
+    // workspace because a browser lacks an unrelated OPFS method.
+    if (typeof FileSystemDirectoryHandle !== 'undefined' && savedDirHandle instanceof FileSystemDirectoryHandle) {
+        return savedDirHandle;
     }
-
-    return savedDirHandle;
+    return await getTemporaryStorageDirHandle();
 }
 
 const resizeHandle = document.querySelector('.resize');
@@ -615,6 +643,7 @@ async function post(endpoint, data) {
             method: 'POST',
             credentials: 'include',
             headers: {
+                'X-FilesMD-Sync': '2',
                 'Content-Type': 'application/json',
                 'Version': getCurrentVersion()
             },
@@ -853,6 +882,8 @@ window.addEventListener('popstate', (event) => {
 
 // Reload files once the app gains focus.
 window.addEventListener('focus', async () => {
+    // Firefox can focus the page while its scripts are still initializing.
+    if (!window.currentEditor) return;
     // Clear any pending chat open timer.
     if (openChatIdleTimer) {
         clearTimeout(openChatIdleTimer);
@@ -894,6 +925,7 @@ window.addEventListener('focus', async () => {
 
 // Sync files on chat focus lose.
 window.addEventListener('blur', async function() {
+    if (!window.currentEditor) return;
     log('BLUR');
     editor.refresh();
 

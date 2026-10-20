@@ -112,14 +112,25 @@ async function exists(path) {
     }
 }
 
-async function remove(path) {
+async function remove(path, {moveTo = null, syncDeletion = true} = {}) {
     let fileHandle = await getFileHandle(path);
     if (fileHandle === null) {
         // TODO fix once Chromium fixes the bug
         logError('Malformed name, skipping file...');
         return;
     }
-    await fileHandle.remove()
+    const baseline = getServerFile(path)?.lastModified;
+    if (typeof fileHandle.remove === 'function') {
+        await fileHandle.remove();
+    } else {
+        const parts = path.split('/').filter(Boolean);
+        const filename = parts.pop();
+        let dir = await getRootDirHandle();
+        for (const name of parts) dir = await dir.getDirectoryHandle(name);
+        await dir.removeEntry(filename);
+    }
+    if (syncDeletion && baseline) pendingFileDeletes.set(path, baseline);
+    if (syncDeletion && moveTo) recordFileMove(path, moveTo);
     log(`File ${path} removed successfully.`);
 
     removeMemFile(path);
@@ -128,7 +139,7 @@ async function remove(path) {
 async function rename(oldpath, newpath) {
     let content = await read(oldpath)
     await write(newpath, content)
-    await remove(oldpath)
+    await remove(oldpath, {moveTo: newpath})
 }
 
 // removeDir deletes a directory and everything under it. Files are deleted

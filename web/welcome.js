@@ -1,15 +1,13 @@
 // When there's no opened local dir, a temporary FS is provided.
-// Temporary FS includes welcome files, so to demonstrate the app.
+// Only an unconfigured demo workspace includes welcome files.
 // First we try to create OPFS storage, fallback to our own in-memory FS on failure.
 
 async function getTemporaryStorageDirHandle() {
     // Safari ships OPFS but its FileSystemFileHandle exposes only
-    // createSyncAccessHandle (worker-only). Older Chromium has no
-    // FileSystemFileHandle.remove(). Fall back to the in-memory FS if
-    // either of those write/delete entry points is missing so app code
-    // doesn't blow up mid-flow.
+    // createSyncAccessHandle (worker-only). Fall back to the in-memory FS
+    // when the writable API is missing.
     if (!opfsIsFullyUsable()) {
-        console.warn('OPFS missing createWritable or remove, using in-memory FS');
+        console.warn('OPFS missing createWritable, using in-memory FS');
         isMemFS = true;
         return getMemFSRoot();
     }
@@ -17,6 +15,11 @@ async function getTemporaryStorageDirHandle() {
     // OPFS requires a secure context (https or localhost), not available on file://
     try {
         const root = await navigator.storage.getDirectory();
+        // A configured sync server must never receive demo data. Keep its
+        // browser mirror separate from any previously seeded demo workspace.
+        if (localStorage.getItem('apiUrl')) {
+            return await root.getDirectoryHandle('server-workspace-v2', {create: true});
+        }
 
         // Skip the seed only when the LAST welcome file is already on disk.
         // Using "any entries" as the seeded marker is racy: a reader
@@ -78,14 +81,11 @@ async function getTemporaryStorageDirHandle() {
     }
 }
 
-// Returns true only when the browser exposes every FileSystemFileHandle
-// method the app relies on. Used by both the temporary-storage path and
-// app.js's getRootDirHandle to decide between OPFS and the in-memory FS.
+// Deletion can use the standard directory.removeEntry fallback.
 function opfsIsFullyUsable() {
     if (typeof FileSystemFileHandle === 'undefined') return false;
     const proto = FileSystemFileHandle.prototype;
-    return typeof proto.createWritable === 'function'
-        && typeof proto.remove === 'function';
+    return typeof proto.createWritable === 'function';
 }
 
 let memFSRoot = null;
@@ -106,7 +106,13 @@ function getMemFSRoot() {
             }
         }
     }
-    populate(WELCOME_FILES, memFSRoot);
+    if (localStorage.getItem('apiUrl')) {
+        // Memory disappears on reload; its persisted server snapshot must too.
+        localStorage.removeItem(SERVER_STORAGE_KEY);
+        server = {files: {}, media: {}, timestamps: {}, mediaTimestamp: 0};
+    } else {
+        populate(WELCOME_FILES, memFSRoot);
+    }
 
     return memFSRoot;
 }

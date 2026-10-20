@@ -60,7 +60,7 @@ func Serve(apiHost, appHost, certDir, logFilename string) {
 	// TODO make it more explicit
 	if certDir == "" {
 		srv := &http.Server{
-			Addr:    ":8080",
+			Addr:    config.ServerCfg.HTTPAddr,
 			Handler: router(serverLogger),
 		}
 
@@ -98,6 +98,14 @@ func Serve(apiHost, appHost, certDir, logFilename string) {
 
 func router(serverLogger *log.Logger) *http.ServeMux {
 	r := http.NewServeMux()
+	if config.ServerCfg.RequireSafeSync {
+		r.HandleFunc("/server-config.js", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/javascript")
+			w.Header().Set("Cache-Control", "no-store")
+			fmt.Fprint(w, "window.FILES_MD_LOCAL_SERVER = true; localStorage.setItem('apiUrl', window.location.origin);")
+		})
+		r.HandleFunc("/session", SessionStatus)
+	}
 
 	// TODO add hashing or secrets
 	// TODO before release habits_v2 => habits
@@ -136,6 +144,10 @@ func router(serverLogger *log.Logger) *http.ServeMux {
 	// For now it is possible to see other user's habits, but is it a big deal?
 	// TODO use X-Telegram-Init-Data header to verify requests
 	r.HandleFunc("GET /habits_v2/{userID}", func(w http.ResponseWriter, r *http.Request) {
+		if config.ServerCfg.RequireSafeSync {
+			http.NotFound(w, r)
+			return
+		}
 		userID, err := strconv.ParseInt(r.PathValue("userID"), 10, 64)
 		if err != nil {
 			serverLogger.Printf("failed to parse userID for habits: %v", err)
@@ -164,6 +176,10 @@ func router(serverLogger *log.Logger) *http.ServeMux {
 
 	// TODO use X-Telegram-Init-Data header to verify requests
 	r.HandleFunc("POST /habits_v2/{userID}/{habitName}/{yearDay}/{status}", func(w http.ResponseWriter, r *http.Request) {
+		if config.ServerCfg.RequireSafeSync {
+			http.NotFound(w, r)
+			return
+		}
 		userID, err := strconv.ParseInt(r.PathValue("userID"), 10, 64)
 		if err != nil {
 			serverLogger.Printf("failed to parse userID: %v", err)
@@ -303,7 +319,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
-		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-CSRF-OneTimeToken, Version")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization, X-CSRF-OneTimeToken, Version, X-FilesMD-Sync")
 		w.Header().Set("Vary", "Origin")
 
 		if r.Method == "OPTIONS" {

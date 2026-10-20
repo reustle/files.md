@@ -12,12 +12,14 @@ import (
 // APIURL / AppURL carry the full scheme+host (e.g. "https://api.files.md").
 // Hostnames are derived from them on demand via APIHost()/AppHost().
 type Config struct {
+	RequireSafeSync   bool `envconfig:"REQUIRE_SAFE_SYNC"`
 	WorkingDir        string
 	StorageDir        string `default:"./storage"  envconfig:"STORAGE_DIR"`
 	BotAPIToken       string `required:"false" envconfig:"BOT_API_TOKEN"`
 	ConfigFilename    string `default:"config.json"`
 	APIURL            string `default:"" envconfig:"API_URL"`
 	AppURL            string `default:"" envconfig:"APP_URL"`
+	HTTPAddr          string `default:":8080" envconfig:"HTTP_ADDR"`
 	ServerCertDir     string `default:"/tmp" envconfig:"CERT_DIR"`
 	TokensDir         string `default:"/tmp" envconfig:"TOKENS_DIR"`
 	TokensSalt        string `envconfig:"TOKENS_SALT"`
