@@ -931,6 +931,7 @@ async function moveCurrentFile(toDir) {
     const oldPath = currentEditor.path;
     const newPath = joinPath('/', toDir, toFilename(currentEditor.path));
     if (oldPath === newPath) return;
+    if (await exists(newPath)) throw new Error('Destination already exists: ' + newPath);
 
     isMessingWithCurrentEditor = true;
 
@@ -994,6 +995,7 @@ async function moveFile(oldPath, newPath) {
     if (oldPath === newPath) {
         return;
     }
+    if (await exists(newPath)) throw new Error('Destination already exists: ' + newPath);
 
     try {
         let file = await (await getFileHandle(oldPath)).getFile();
@@ -1023,6 +1025,7 @@ async function moveFile(oldPath, newPath) {
         log(`Moved ${oldPath} to ${newPath}`);
     } catch (error) {
         logError('Error moving file:', error);
+        throw error;
     }
 }
 
@@ -1122,7 +1125,7 @@ function saveServerFiles() {
 
 async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
     // There are a few awaits during syncCurrentFile, we should not change currentEditor during that.
-    while (isMessingWithCurrentEditor) {
+    while (isMessingWithCurrentEditor || (window.FILES_MD_LOCAL_SERVER && isSyncingFiles)) {
         log('Waiting isMessingWithCurrentEditor...');
         await new Promise(r => setTimeout(r, 50));
     }
@@ -1274,9 +1277,6 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
 // If currentEditor is changed during the execution of this function, we'll have RC.
 // So, wherever we change currentEditor reference, we should lock via isMessingWithCurrentEditor.
 async function syncCurrentFile(switchAwayEditor = false) {
-    if (window.FILES_MD_LOCAL_SERVER) {
-        while (isSyncingFiles) await new Promise(resolve => setTimeout(resolve, 25));
-    }
     if (files === undefined || debug || !window.currentEditor || currentEditor.path === undefined) {
         return;
     }
@@ -1292,6 +1292,9 @@ async function syncCurrentFile(switchAwayEditor = false) {
         return;
     }
 
+    if (window.FILES_MD_LOCAL_SERVER) {
+        while (isSyncingFiles) await new Promise(resolve => setTimeout(resolve, 25));
+    }
     // TODO replace with queues?
     if (isMessingWithCurrentEditor) {
         return;

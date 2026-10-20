@@ -154,35 +154,28 @@ async function rename(oldpath, newpath) {
     await remove(oldpath, {moveTo: newpath})
 }
 
-// removeDir deletes a directory and everything under it. Files are deleted
-// one-by-one so the in-memory file tree and server-sync bookkeeping stay in
-// sync.
+// Only explicitly enumerated files are removed. A failed file operation or
+// an unsupported file left in the folder must never trigger recursive deletion.
 async function removeDir(dirPath) {
     const filePaths = collectFilePathsInDir(dirPath);
-    for (const p of filePaths) {
-        try {
-            await remove(p);
-        } catch (err) {
-            logError('removeDir: failed to remove file', p, err);
-        }
-    }
-
-    const parts = trimPrefix(dirPath, '/').split('/').filter(Boolean);
-    const dirName = parts.pop();
-
-    const rootHandle = await getRootDirHandle();
-    let parentHandle = rootHandle;
-    for (const seg of parts) {
-        parentHandle = await parentHandle.getDirectoryHandle(seg);
-    }
-    try {
-        await parentHandle.removeEntry(dirName, { recursive: true });
-    } catch (err) {
-        logError('removeDir: removeEntry failed', dirPath, err);
-    }
-
+    for (const path of filePaths) await remove(path);
+    await removeEmptyDirectoryTree(dirPath);
     removeMemDir(dirPath);
-    log(`Dir ${dirPath} removed.`);
+}
+
+async function removeEmptyDirectoryTree(dirPath) {
+    const parts = dirPath.split('/').filter(Boolean);
+    const name = parts.pop();
+    if (!name) throw new Error('Cannot remove the notes root');
+    let parent = await getRootDirHandle();
+    for (const part of parts) parent = await parent.getDirectoryHandle(part);
+    const dir = await parent.getDirectoryHandle(name);
+    for await (const entry of dir.values()) {
+        if (entry.kind === 'directory') await removeEmptyDirectoryTree(joinPath(dirPath, entry.name));
+    }
+    // This fails if any file remains, including files the app doesn't support.
+    await parent.removeEntry(name);
+    stageLocalDirectory(dirPath, 'rmdir');
 }
 
 // moveDir moves every file under oldDirPath into newDirPath, which can be in
@@ -198,40 +191,16 @@ async function moveDir(oldDirPath, newDirPath) {
     }
 
     const filePaths = collectFilePathsInDir(oldDirPath);
-    if (filePaths.length === 0) {
-        await createDir(newDirPath);
-    }
-    let allMoved = true;
+    const directories = [oldDirPath];
+    walk(files, (path, isFile) => {
+        if (!isFile && path.startsWith(oldDirPath + '/')) directories.push(removeTrailingSlash(path));
+    });
+    for (const path of directories) await createDir(newDirPath + path.slice(oldDirPath.length));
     for (const oldFilePath of filePaths) {
-        const rel = oldFilePath.slice(oldDirPath.length);
-        const newFilePath = newDirPath + rel;
-        try {
-            await moveFile(oldFilePath, newFilePath);
-        } catch (err) {
-            logError('moveDir: failed to move file', oldFilePath, err);
-            allMoved = false;
-        }
+        await moveFile(oldFilePath, newDirPath + oldFilePath.slice(oldDirPath.length));
     }
 
-    if (!allMoved) {
-        // Some file didn't make it across. A recursive remove now would
-        // silently take those leftovers with it, so leave the old dir alone.
-        logError('moveDir: not all files moved, leaving old dir in place', oldDirPath);
-        return;
-    }
-
-    const oldParts = trimPrefix(oldDirPath, '/').split('/').filter(Boolean);
-    const oldDirName = oldParts.pop();
-    const rootHandle = await getRootDirHandle();
-    let oldParentHandle = rootHandle;
-    for (const seg of oldParts) {
-        oldParentHandle = await oldParentHandle.getDirectoryHandle(seg);
-    }
-    try {
-        await oldParentHandle.removeEntry(oldDirName, { recursive: true });
-    } catch (err) {
-        logError('moveDir: removeEntry old dir failed', oldDirPath, err);
-    }
+    await removeEmptyDirectoryTree(oldDirPath);
 
     removeMemDir(oldDirPath);
     log(`Dir ${oldDirPath} moved to ${newDirPath}.`);
@@ -252,7 +221,7 @@ async function renameDir(oldDirPath, newName) {
 function collectFilePathsInDir(dirPath) {
     const collected = [];
     walk(files, (p, isFile) => {
-        if (!isFile) return;
+        if (!isFile || (window.FILES_MD_LOCAL_SERVER && !isNotePath(p))) return;
         if (p === dirPath || p.startsWith(dirPath + '/')) {
             collected.push(p);
         }
@@ -294,9 +263,10 @@ async function mkdirAll(path) {
 
 // createDir creates an empty directory on OPFS at the given path and registers
 // it in the in-memory file tree so the sidebar picks it up.
-async function createDir(dirPath) {
+async function createDir(dirPath, {syncDirectory = true} = {}) {
     const parts = trimPrefix(dirPath, '/').split('/').filter(Boolean);
     if (parts.length === 0) return;
+    if (syncDirectory) stageLocalDirectory(dirPath, 'mkdir');
 
     let dirHandle = await getRootDirHandle();
     for (const seg of parts) {

@@ -2,6 +2,8 @@
 // Browser absence never asks the server to delete a file. Only remove() does.
 const LOCAL_DRAFT_KEY = 'notes-drafts-v3:' + API_URL;
 let localDrafts = JSON.parse(localStorage.getItem(LOCAL_DRAFT_KEY) || '{}');
+const LOCAL_DIRECTORY_KEY = 'notes-directories-v3:' + API_URL;
+let localDirectoryChanges = JSON.parse(localStorage.getItem(LOCAL_DIRECTORY_KEY) || '{}');
 let localNotesInitialized = false;
 let localSyncTimer = null;
 let localSyncFailed = false;
@@ -25,6 +27,18 @@ function stageLocalDelete(path, version) {
     if (!window.FILES_MD_LOCAL_SERVER || !isNotePath(path)) return;
     localDrafts[path] = {deleted: true, version};
     persistLocalDrafts();
+}
+
+function stageLocalDirectory(path, action) {
+    if (!window.FILES_MD_LOCAL_SERVER) return;
+    path = '/' + path.split('/').filter(Boolean).join('/');
+    if (path === '/') return;
+    localDirectoryChanges[path] = {action, id: Date.now() + ':' + Math.random()};
+    persistLocalDirectories();
+}
+
+function persistLocalDirectories() {
+    localStorage.setItem(LOCAL_DIRECTORY_KEY, JSON.stringify(localDirectoryChanges));
 }
 
 function localSyncNotice(message) {
@@ -59,6 +73,9 @@ function updateNoteEditor(cm, content, version) {
 }
 
 async function restoreLocalDrafts() {
+    for (const [path, change] of Object.entries(localDirectoryChanges)) {
+        if (change.action === 'mkdir') await createDir(path, {syncDirectory: false});
+    }
     for (const [path, draft] of Object.entries(localDrafts)) {
         if (draft.deleted) {
             pendingFileDeletes.set(path, draft.version);
@@ -71,8 +88,9 @@ async function restoreLocalDrafts() {
 
 async function syncLocalNotes(forcePath) {
     if (!hasLastServerOk()) return;
-    while (isSyncingFiles) await new Promise(resolve => setTimeout(resolve, 25));
-    if (isMessingWithCurrentEditor || isSaving || isLoadingLocalFiles) return;
+    while (isSyncingFiles || isMessingWithCurrentEditor || isSaving || isLoadingLocalFiles) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+    }
     isSyncingFiles = true;
     try {
         if (!localNotesInitialized) await restoreLocalDrafts();
@@ -92,6 +110,9 @@ async function syncLocalNotes(forcePath) {
             if (isNotePath(note.path)) stageLocalDraft(note.path, note.content);
         }
         for (const [path, version] of pendingFileDeletes) stageLocalDelete(path, version);
+        const directoryChanges = Object.entries(localDirectoryChanges);
+        const mkdirs = directoryChanges.filter(([, change]) => change.action === 'mkdir').map(([path]) => path.slice(1));
+        const rmdirs = directoryChanges.filter(([, change]) => change.action === 'rmdir').map(([path]) => path.slice(1));
         const writes = [], deletes = [];
         for (const [path, draft] of Object.entries(localDrafts)) {
             const change = {path: path.slice(1), version: String(draft.version || '')};
@@ -101,7 +122,7 @@ async function syncLocalNotes(forcePath) {
         const response = await fetch(`${API_URL}/notes/sync`, {
             method: 'POST', credentials: 'include',
             headers: {'Content-Type': 'application/json', 'X-FilesMD-Sync': '3'},
-            body: JSON.stringify({writes, deletes}),
+            body: JSON.stringify({writes, deletes, mkdirs, rmdirs}),
         });
         const body = await response.text();
         let snapshot;
@@ -132,12 +153,17 @@ async function syncLocalNotes(forcePath) {
             }
         }
         persistLocalDrafts();
+        for (const [path, sent] of directoryChanges) {
+            if (localDirectoryChanges[path]?.id !== sent.id) continue;
+            if (sent.action === 'rmdir' || snapshot.directories.includes(path.slice(1))) delete localDirectoryChanges[path];
+        }
+        persistLocalDirectories();
         await applyNotesSnapshot(snapshot, resolved);
         server.initialized = true;
         localNotesInitialized = true;
         saveServerFiles();
         lastSyncOkAt = Date.now();
-        renderSyncStatus(Object.keys(localDrafts).length ? 'edits' : 'ok');
+        renderSyncStatus(Object.keys(localDrafts).length || Object.keys(localDirectoryChanges).length ? 'edits' : 'ok');
         if (localSyncFailed) localSyncNotice('');
         localSyncFailed = false;
         if (Object.keys(conflicts).length) {
@@ -161,6 +187,7 @@ async function syncLocalNotes(forcePath) {
 async function applyNotesSnapshot(snapshot, resolved) {
     const changed = [];
     for (const dir of snapshot.directories) {
+        if (localDirectoryChanges['/' + dir]?.action === 'rmdir') continue;
         let handle = await getRootDirHandle();
         let entries = files;
         for (const part of dir.split('/')) {
@@ -219,6 +246,7 @@ async function applyNotesSnapshot(snapshot, resolved) {
     // Remove only directories previously mirrored from this server, and only
     // when empty. Unsent files must never be removed by recursive cleanup.
     for (const dir of (server.directories || []).filter(dir => !snapshot.directories.includes(dir)).sort((a, b) => b.length - a.length)) {
+        if (localDirectoryChanges['/' + dir]?.action === 'mkdir') continue;
         const parts = dir.split('/');
         const name = parts.pop();
         try {

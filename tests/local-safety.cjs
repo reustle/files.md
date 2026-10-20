@@ -163,6 +163,7 @@ async function verifyLiveChanges(page, notes) {
     const context = page.context();
     await context.route('**/notes/sync', route => route.abort());
     await page.evaluate(async () => {
+        await createDir('/Offline empty/nested');
         await write('/Offline.md', 'Draft saved while disconnected');
         await write('/Cancelled.md', 'Never publish this deleted draft');
         await remove('/Cancelled.md');
@@ -175,6 +176,7 @@ async function verifyLiveChanges(page, notes) {
     await context.unroute('**/notes/sync');
     await page.waitForFunction(() => server.initialized && !isSyncingFiles && !localDrafts['/Offline.md']);
     assert.equal(await fs.readFile(path.join(notes, 'Offline.md'), 'utf8'), 'Draft saved while disconnected');
+    assert.equal((await fs.stat(path.join(notes, 'Offline empty/nested'))).isDirectory(), true);
     assert.equal(await fs.readFile(path.join(notes, 'Offline move.md'), 'utf8'), 'Edited content');
     await assert.rejects(fs.stat(path.join(notes, 'moved/Renamed by header.md')), {code: 'ENOENT'});
     await assert.rejects(fs.stat(path.join(notes, 'Cancelled.md')), {code: 'ENOENT'});
@@ -231,6 +233,46 @@ async function verifyNestedFolders(page, notes) {
     }, deep);
     assert.equal(await fs.readFile(path.join(notes, deep), 'utf8'), 'Edited Nested note content');
     await page.evaluate(async () => { currentEditor.markClean(); await openChat(); });
+}
+
+async function verifyFolderOperations(page, notes) {
+    await page.evaluate(async () => { await createDir('/New empty/nested'); await syncFilesWithServer(); });
+    assert.equal((await fs.stat(path.join(notes, 'New empty/nested'))).isDirectory(), true);
+    await page.evaluate(async () => { await removeDir('/New empty'); await syncFilesWithServer(); });
+    await assert.rejects(fs.stat(path.join(notes, 'New empty')), {code: 'ENOENT'});
+
+    await fs.mkdir(path.join(notes, 'Move folder/nested/empty'), {recursive: true});
+    await fs.writeFile(path.join(notes, 'Move folder/nested/Note.md'), 'Move safely');
+    await fs.mkdir(path.join(notes, 'Unlisted'));
+    await fs.writeFile(path.join(notes, 'Unlisted/keep.txt'), 'Preserve unsupported files');
+    await page.waitForFunction(() => !isSyncingFiles && getMemFile('/Move folder/nested/Note.md'));
+    await page.evaluate(async () => { await moveDir('/Move folder', '/Moved folder'); await syncFilesWithServer(); });
+    assert.equal(await fs.readFile(path.join(notes, 'Moved folder/nested/Note.md'), 'utf8'), 'Move safely');
+    assert.equal((await fs.stat(path.join(notes, 'Moved folder/nested/empty'))).isDirectory(), true);
+    await assert.rejects(fs.stat(path.join(notes, 'Move folder')), {code: 'ENOENT'});
+    await page.evaluate(async () => { await removeDir('/Unlisted'); await syncFilesWithServer(); });
+    assert.equal(await fs.readFile(path.join(notes, 'Unlisted/keep.txt'), 'utf8'), 'Preserve unsupported files');
+
+    const protectedSource = await page.evaluate(async () => {
+        const original = writeIfContentIsDifferent;
+        writeIfContentIsDifferent = async () => { throw new Error('Simulated move write failure'); };
+        let failed = false;
+        try { await moveDir('/Moved folder', '/Failed move'); }
+        catch { failed = true; }
+        finally { writeIfContentIsDifferent = original; }
+        return failed && await read('/Moved folder/nested/Note.md') === 'Move safely'
+            && !pendingFileDeletes.has('/Moved folder/nested/Note.md');
+    });
+    assert.equal(protectedSource, true);
+    await page.evaluate(async () => { await syncFilesWithServer(); });
+    assert.equal(await fs.readFile(path.join(notes, 'Moved folder/nested/Note.md'), 'utf8'), 'Move safely');
+
+    const refusedOverwrite = await page.evaluate(async () => {
+        try { await moveFile('/Moved folder/nested/Note.md', '/Help.md'); }
+        catch { return await read('/Help.md') === 'My own help note'; }
+        return false;
+    });
+    assert.equal(refusedOverwrite, true);
 }
 
 async function runCase(binary, browserType, volatile, empty) {
@@ -425,6 +467,7 @@ async function runCase(binary, browserType, volatile, empty) {
         if (!empty) {
             await verifyLiveChanges(page, notes);
             await verifyNestedFolders(page, notes);
+            await verifyFolderOperations(page, notes);
         }
         if (browserType === chromium && !volatile && !empty) await verifyFolderPicker(page);
         assert.deepEqual(errors, []);
@@ -449,14 +492,18 @@ async function runCase(binary, browserType, volatile, empty) {
         binary = path.join(buildDir, 'server');
         await promisify(execFile)('go', ['build', '-o', binary, './cmd/local-server'], {cwd: repo});
     }
+    const cases = [];
     for (const empty of [false, true]) {
         if (process.env.BROWSER !== 'firefox') {
-            await runCase(binary, chromium, false, empty);
-            await runCase(binary, chromium, true, empty);
+            cases.push(() => runCase(binary, chromium, false, empty), () => runCase(binary, chromium, true, empty));
         }
         if (process.env.BROWSER !== 'chromium') {
-            await runCase(binary, firefox, false, empty);
-            await runCase(binary, firefox, true, empty);
+            cases.push(() => runCase(binary, firefox, false, empty), () => runCase(binary, firefox, true, empty));
         }
+    }
+    for (let i = 0; i < cases.length; i += 4) {
+        const results = await Promise.allSettled(cases.slice(i, i + 4).map(run => run()));
+        const failures = results.filter(result => result.status === 'rejected');
+        if (failures.length) throw new AggregateError(failures.map(result => result.reason), 'Safety regression failed');
     }
 })().catch(error => { console.error(error); process.exitCode = 1; });
