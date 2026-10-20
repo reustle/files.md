@@ -129,3 +129,31 @@ func TestNotesIgnoreLinksAndRejectTraversal(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "private", string(data))
 }
+
+func TestNotesExplicitDirectoryOperationsKeepUnlistedFiles(t *testing.T) {
+	root, store, call := notesFixture(t)
+	code, result := call(notesRequest{Mkdirs: []string{"Empty/Nested", "Moved"}})
+	require.Equal(t, 200, code)
+	require.Contains(t, result.Directories, "Empty/Nested")
+	require.NoError(t, store.WriteNote("Empty/Nested/Note.md", "content", ""))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "Empty", "unlisted.txt"), []byte("keep me"), 0600))
+	code, result = call(notesRequest{
+		Writes:  []noteChange{{Path: "Moved/Note.md", Content: "content"}},
+		Deletes: []noteChange{{Path: "Empty/Nested/Note.md", Version: fs.ContentVersion("content")}},
+		Rmdirs:  []string{"Empty", "Empty/Nested"},
+	})
+	require.Equal(t, 200, code)
+	require.Contains(t, result.Directories, "Empty", "nonempty source directory must survive")
+	require.NotContains(t, result.Directories, "Empty/Nested")
+	data, err := os.ReadFile(filepath.Join(root, "Empty", "unlisted.txt"))
+	require.NoError(t, err)
+	require.Equal(t, "keep me", string(data))
+	require.Equal(t, "content", result.Files["Moved/Note.md"].Content)
+	for _, name := range []string{"", ".", "..", "../outside", ".hidden", "/absolute", "Moved/Note.md"} {
+		code, _ = call(notesRequest{Rmdirs: []string{name}})
+		require.Equal(t, 400, code, name)
+	}
+	code, result = call(notesRequest{Rmdirs: []string{"Moved"}})
+	require.Equal(t, 200, code)
+	require.Contains(t, result.Files, "Moved/Note.md", "folder cleanup is never recursive")
+}

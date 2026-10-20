@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/afero"
 )
@@ -122,4 +123,10 @@ func (v *VersionedOSFS) Rename(oldname, newname string) error {
 		return err
 	}
 	return v.Fs.Rename(oldname, newname)
+}
+
+// Rmdir cannot remove a file or a nonempty directory, even if an external
+// process changed the entry after the caller validated its path.
+func (v *VersionedOSFS) RemoveEmptyDirectory(name string) error {
+	return syscall.Rmdir(name)
 }

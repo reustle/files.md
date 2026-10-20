@@ -35,7 +35,14 @@ func ContentVersion(content string) string {
 
 // Note paths are relative, canonical and never traverse hidden or linked dirs.
 func (fs FS) notePath(name string) (string, error) {
-	if name == "" || strings.Contains(name, "\\") || filepath.ToSlash(filepath.Clean(name)) != name || !strings.EqualFold(filepath.Ext(name), ".md") {
+	if !strings.EqualFold(filepath.Ext(name), ".md") {
+		return "", ErrUnsafePath
+	}
+	return fs.entryPath(name)
+}
+
+func (fs FS) entryPath(name string) (string, error) {
+	if name == "" || strings.Contains(name, "\\") || filepath.ToSlash(filepath.Clean(name)) != name {
 		return "", ErrUnsafePath
 	}
 	full, err := fs.SafePath("/", name)
@@ -200,6 +207,51 @@ func (fs FS) DeleteNote(name, expected string) error {
 	}
 	if err := fs.CheckNoteVersion(name, expected); err != nil {
 		return err
+	}
+	return fs.backend.Remove(full)
+}
+
+// Directory operations are explicit. Cleanup only removes an empty directory;
+// newly arrived or unsupported files are never recursively deleted.
+func (fs FS) CheckNoteDirectory(name string) error {
+	full, err := fs.entryPath(name)
+	if err != nil {
+		return err
+	}
+	info, err := fs.backend.Stat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", name)
+	}
+	return nil
+}
+
+func (fs FS) CreateNoteDirectory(name string) error {
+	if err := fs.CheckNoteDirectory(name); err != nil {
+		return err
+	}
+	full, err := fs.entryPath(name)
+	if err != nil {
+		return err
+	}
+	return fs.backend.MkdirAll(full, 0755)
+}
+
+func (fs FS) RemoveEmptyNoteDirectory(name string) error {
+	if err := fs.CheckNoteDirectory(name); err != nil {
+		return err
+	}
+	full, err := fs.entryPath(name)
+	if err != nil {
+		return err
+	}
+	if backend, ok := fs.backend.(interface{ RemoveEmptyDirectory(string) error }); ok {
+		return backend.RemoveEmptyDirectory(full)
 	}
 	return fs.backend.Remove(full)
 }

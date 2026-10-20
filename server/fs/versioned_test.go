@@ -47,3 +47,24 @@ func TestVersionedOSFSRejectsSymlinks(t *testing.T) {
 	v := &VersionedOSFS{Fs: afero.NewOsFs(), Root: root, BackupDir: t.TempDir()}
 	require.Error(t, afero.WriteFile(v, filepath.Join(root, "link", "note.md"), []byte("edited"), 0600))
 }
+
+func TestAtomicNoteWriteBacksUpAndFailsClosed(t *testing.T) {
+	root, backup := t.TempDir(), t.TempDir()
+	name := filepath.Join(root, "Note.md")
+	require.NoError(t, os.WriteFile(name, []byte("original"), 0600))
+	backend := &VersionedOSFS{Fs: afero.NewOsFs(), Root: root, BackupDir: backup}
+	store, err := NewFS(root, backend)
+	require.NoError(t, err)
+	require.NoError(t, store.WriteNote("Note.md", "edited", ContentVersion("original")))
+	data, err := os.ReadFile(filepath.Join(backup, "Note.md", ContentVersion("original")))
+	require.NoError(t, err)
+	require.Equal(t, "original", string(data))
+	backend.BackupDir = name // A file cannot be used as a backup directory.
+	require.Error(t, store.WriteNote("Note.md", "must not replace", ContentVersion("edited")))
+	data, err = os.ReadFile(name)
+	require.NoError(t, err)
+	require.Equal(t, "edited", string(data))
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "failed atomic writes must clean up their staging files")
+}

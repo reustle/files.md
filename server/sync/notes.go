@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/zakirullin/files.md/server/fs"
@@ -22,6 +24,8 @@ type noteChange struct {
 type notesRequest struct {
 	Writes  []noteChange `json:"writes"`
 	Deletes []noteChange `json:"deletes"`
+	Mkdirs  []string     `json:"mkdirs"`
+	Rmdirs  []string     `json:"rmdirs"`
 }
 
 type notesResponse struct {
@@ -53,6 +57,12 @@ func SyncNotes(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "Cannot read complete notes directory: "+err.Error(), 500)
 		return
+	}
+	for _, name := range append(append([]string{}, request.Mkdirs...), request.Rmdirs...) {
+		if err := store.CheckNoteDirectory(name); err != nil {
+			http.Error(w, "Cannot access directory: "+err.Error(), 400)
+			return
+		}
 	}
 	conflicts := map[string]string{}
 	seen := map[string]bool{}
@@ -110,6 +120,12 @@ func SyncNotes(w http.ResponseWriter, r *http.Request) {
 			conflicts[change.Path] = copyPath
 		}
 	} else {
+		for _, name := range request.Mkdirs {
+			if err := store.CreateNoteDirectory(name); err != nil {
+				http.Error(w, "Cannot create directory", 500)
+				return
+			}
+		}
 		for _, change := range request.Writes {
 			if current, ok := snapshot.Files[change.Path]; ok && current.Content == change.Content {
 				continue
@@ -125,6 +141,16 @@ func SyncNotes(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := store.DeleteNote(change.Path, change.Version); err != nil {
 				http.Error(w, "Note changed or could not be backed up; deletion refused", http.StatusConflict)
+				return
+			}
+		}
+	}
+	if len(conflicts) == 0 {
+		sort.Slice(request.Rmdirs, func(i, j int) bool { return len(request.Rmdirs[i]) > len(request.Rmdirs[j]) })
+		for _, name := range request.Rmdirs {
+			err := store.RemoveEmptyNoteDirectory(name)
+			if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
+				http.Error(w, "Cannot clean up empty directory", 500)
 				return
 			}
 		}
