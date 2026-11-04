@@ -1519,14 +1519,8 @@ function buildFolderMenu(item, dirPath) {
             attempt = trimmed;
         }
         try {
-            const editorWasInside = pathIsInsideDir(currentEditor.path);
-            const oldEditorPath = currentEditor.path;
             await renameDir(dirPath, trimmed);
-            if (editorWasInside) {
-                const parentParts = dirPath.split('/').filter(Boolean).slice(0, -1);
-                const newDirPath = '/' + parentParts.concat(trimmed).join('/');
-                currentEditor.path = newDirPath + oldEditorPath.slice(dirPath.length);
-            }
+            // moveFile updates each matching editor, including an inactive pane.
             await renderSidebar();
         } catch (err) {
             logError('renameDir failed', err);
@@ -1585,22 +1579,6 @@ function buildFileMenu(item, filePath) {
             const newPath = (parentDir === '/' ? '' : parentDir) + '/' + finalName;
             try {
                 await moveFile(filePath, newPath);
-                if (isCurrent) {
-                    currentEditor.path = newPath;
-                    // Editor still shows the old `# OldName` heading. The
-                    // rename-from-header watcher in syncCurrentText will see
-                    // the heading disagree with the new path and rename the
-                    // file back, so rewrite line 0 to the new header.
-                    const newHeader = toHeader(toFilename(newPath));
-                    const firstLine = currentEditor.getLine(0) || '';
-                    if (firstLine !== newHeader) {
-                        currentEditor.replaceRange(
-                            newHeader,
-                            {line: 0, ch: 0},
-                            {line: 0, ch: firstLine.length}
-                        );
-                    }
-                }
                 await renderSidebar();
             } catch (err) {
                 logError('rename failed', err);

@@ -79,8 +79,9 @@ module.exports = async function verifyArchiveSafety(page, notes) {
         await write('/Other pane.md', 'Second pane');
         files = await loadLocalFiles(await getRootDirHandle());
         await syncFilesWithServer();
-        await openFile('/Other pane.md', true, 'editor2-textarea');
         await openFile('/Move focus.md');
+        await openFile('/Other pane.md', true, 'editor2-textarea');
+        currentEditor = editor;
         const original = writeIfContentIsDifferent;
         writeIfContentIsDifferent = async (...args) => {
             const result = await original(...args);

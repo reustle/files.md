@@ -44,8 +44,12 @@ a dirty editor keeps its text until it can be saved safely.
 Edits and explicit deletions carry the content version the browser last read.
 If the disk version has changed, the server preserves browser edits as Markdown
 files under `Conflicts/` and cancels the batch's requested deletions. Browser
-drafts and pending moves survive reloads while disconnected. Do not clear site
-data while the sync indicator reports pending changes.
+drafts and pending titles are journaled on each edit. Separate tab journals keep
+one tab from overwriting another tab's unsent work; conflicting recovered edits
+become separate notes. Pending moves survive reloads while disconnected. A note
+uses one editable buffer when opened in both panes. If browser storage is full,
+the app warns you to keep the tab open or copy the text somewhere safe. Do not
+clear site data while the sync indicator reports pending changes.
 
 Folders can be nested at any depth. Expansion state is stored per full folder
 path. Folder creation and cleanup are explicit operations; cleanup only removes
@@ -91,6 +95,10 @@ npm run test:safety --prefix tests
 ```
 
 The safety tests build a separate server and use temporary directories and
-loopback ports. They cover Chromium and Firefox with native and forced in-memory
-storage, empty and populated workspaces, live external changes, stale-version
-conflicts, offline reloads and moves, deep folders, and failed writes. Set `CHROMIUM_BIN` or `FIREFOX_BIN` to use an existing browser executable.
+ephemeral ports bound to `0.0.0.0`, accessed through loopback. They cover Chromium
+and Firefox with native and forced in-memory storage, empty and populated
+workspaces, live external changes, watcher reconnects, stale-version conflicts,
+offline reloads, tab crashes, concurrent drafts, edits during requests, pending
+titles, split panes, folder moves, immediate archiving, quota errors, and failed
+writes. The Chromium native-storage case also runs with a real service worker.
+Set `CHROMIUM_BIN` or `FIREFOX_BIN` to use an existing browser executable.

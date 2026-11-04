@@ -736,6 +736,10 @@ async function logf(prefix, color, args) {
         'color: #888; font-size: 0.9em'       // Stack trace in gray
     );
 
+    // Diagnostics must not create or append to notes in a connected workspace.
+    // In particular, upstream's Markdown log would sync itself recursively.
+    if (window.FILES_MD_LOCAL_SERVER) return;
+
     // File logging with full timestamp
     const day = date.getDate().toString().padStart(2, '0');
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
