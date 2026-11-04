@@ -78,6 +78,8 @@ func (b *Bot) showTimezone(_ []string) error {
 		"Europe/Warsaw",
 
 		// Asia
+		"Asia/Almaty",
+		"Asia/Colombo",
 		"Asia/Nicosia",
 		"Asia/Tbilisi",
 		"Asia/Tokyo",

@@ -376,6 +376,37 @@ a:hover {
     border-radius: 5px;
 }
 
+#search-results li.content-match {
+    white-space: normal;
+    word-break: break-word;
+}
+
+.content-match-snippet {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.content-match-snippet mark {
+    background: rgba(255, 196, 0, 0.35);
+    color: inherit;
+    border-radius: 3px;
+}
+
+#search-results .focused .content-match-snippet mark {
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.content-match-path {
+    margin-top: 2px;
+    font-size: 0.85em;
+    opacity: 0.6;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .CodeMirror-scroll {
     padding: 2em 0;
 }
@@ -577,6 +608,16 @@ pre.HyperMD-task-line span.cm-formatting-list-ul.hmd-hidden-token + .cm-formatti
 /*For some reason ``` in code aren't hidden*/
 .HyperMD-codeblock .hmd-hidden-token {
     display: none !important;
+}
+
+.cm-s-hypermd-light pre.HyperMD-codeblock .cm-header {
+    font-size: inherit !important;
+    line-height: inherit !important;
+}
+
+.cm-s-hypermd-light pre.HyperMD-codeblock span.cm-variable-2,
+.cm-s-hypermd-light pre.HyperMD-codeblock span.cm-variable-3 {
+    color: inherit;
 }
 
 /*Hide (...) in links. Don't hide links after images.
@@ -1082,4 +1123,13 @@ pre.HyperMD-codeblock-end {
     color: var(--col-tx);
     box-shadow: 0 2px 12px #0002;
     z-index: 1000;
+}
+
+#sidebar, #content {
+    transition: opacity 0.15s;
+}
+
+body:has(#search:not([style*="display: none"])) :is(#sidebar, #content),
+body:has(#move:not([style*="display: none"])) :is(#sidebar, #content) {
+    opacity: 0.4;
 }

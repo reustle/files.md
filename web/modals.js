@@ -4,6 +4,8 @@ class SearchModal {
     constructor() {
         this.selectedMsgElement = null;
         this.focusedIndex = 0;
+        this.searchId = 0;
+        this.fullText = false;
         this.init();
     }
 
@@ -48,10 +50,17 @@ class SearchModal {
     }
 
     search() {
+        const searchId = ++this.searchId;
         let search = document.getElementById('search-input').value.toLowerCase();
 
         const list = document.getElementById('search-results');
         list.innerHTML = '';
+
+        if (this.fullText) {
+            this.focusedIndex = 0;
+            this.searchContent(searchId);
+            return;
+        }
 
         if (search.endsWith('/')) {
             const folderName = search;
@@ -185,22 +194,86 @@ class SearchModal {
         searchModal.showResults(results);
     }
 
-    open(text = '', buttonElement = null, messageElement = null) {
+    async searchContent(searchId) {
+        const query = document.getElementById('search-input').value.toLowerCase();
+        if (this.selectedMsgElement !== null || query.length < 3) return;
+
+        await new Promise(r => setTimeout(r, 150));
+        if (searchId !== this.searchId) return;
+
+        const paths = [];
+        walkFilesExcludingSystemDirs(path => {
+            if (path.endsWith('.md')) paths.push(path);
+        });
+
+        const matches = [];
+        await Promise.all(paths.map(async path => {
+            try {
+                const text = await (await getMemFile(path).handle.getFile()).text();
+                const lower = text.toLowerCase();
+                const idx = lower.indexOf(query);
+                if (idx === -1) return;
+                const line = lower.slice(0, idx).split('\n').length - 1;
+                const col = idx - (lower.lastIndexOf('\n', idx) + 1);
+                const lineText = text.split('\n')[line] || '';
+                const from = Math.max(0, col - 60);
+                const to = col + query.length + 160;
+                matches.push({
+                    path, line,
+                    before: (from > 0 ? '…' : '') + lineText.slice(from, col).trimStart(),
+                    match: lineText.slice(col, col + query.length),
+                    after: lineText.slice(col + query.length, to) + (to < lineText.length ? '…' : ''),
+                });
+            } catch (e) {
+            }
+        }));
+        if (searchId !== this.searchId) return;
+
+        const list = document.getElementById('search-results');
+        matches.sort((a, b) => a.path.localeCompare(b.path)).forEach(({path, line, before, match, after}) => {
+            const item = document.createElement('li');
+            item.className = 'content-match';
+            const snippetEl = document.createElement('div');
+            snippetEl.className = 'content-match-snippet';
+            const mark = document.createElement('mark');
+            mark.textContent = match;
+            snippetEl.append(before, mark, after);
+            const pathEl = document.createElement('div');
+            pathEl.className = 'content-match-path';
+            pathEl.textContent = trimPrefix(trimPostfix(path, '.md'), '/');
+            item.append(snippetEl, pathEl);
+            item.setAttribute('data-path', path);
+            item.setAttribute('data-line', line);
+            item.onclick = () => this.moveToFile(path, line);
+            item.onmousemove = () => {
+                this.focusedIndex = Array.from(list.children).indexOf(item);
+                this.updateFocusedItem();
+            };
+            list.appendChild(item);
+        });
+        this.updateFocusedItem();
+    }
+
+    open(text = '', buttonElement = null, messageElement = null, fullText = false) {
         moveModal.close();
         this.selectedMsgElement = messageElement;
+        this.fullText = fullText;
 
         let modal = document.getElementById('search');
         modal.style.display = 'flex';
 
         const inputField = document.getElementById('search-input');
         inputField.value = text;
+        inputField.placeholder = fullText ? 'Search in files...' : 'Go to file...';
         inputField.focus();
 
         this.focusedIndex = 0;
         const goToFileResults = document.getElementById('search-results');
         goToFileResults.innerHTML = '';
 
-        if (text === '' && this.selectedMsgElement === null) {
+        if (text === '' && fullText) {
+            ++this.searchId;
+        } else if (text === '' && this.selectedMsgElement === null) {
             this.showRecentFiles();
         } else if (text === '') {
             this.showRootFiles();
@@ -371,7 +444,7 @@ class SearchModal {
         this.close();
     }
 
-    async moveToFile(path) {
+    async moveToFile(path, line) {
         if (this.selectedMsgElement !== null) {
             const selectedMessages = document.querySelectorAll('.message.selected');
 
@@ -402,6 +475,10 @@ class SearchModal {
             this.close();
         } else {
             await openFile(path);
+            if (line !== undefined) {
+                currentEditor.setCursor({line, ch: 0});
+                currentEditor.scrollIntoView(null, currentEditor.getScrollInfo().clientHeight / 2);
+            }
             this.close();
         }
     }
@@ -416,7 +493,8 @@ class SearchModal {
             return;
         }
         const path = item.getAttribute('data-path');
-        this.moveToFile(path);
+        const line = item.getAttribute('data-line');
+        this.moveToFile(path, line === null ? undefined : Number(line));
     }
 
     updateFocusedItem() {

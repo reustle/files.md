@@ -71,6 +71,7 @@ async function sendToChat() {
     });
     const formattedContent = `\n- [ ] \`${timestamp}\` ${text}\n`;
     await writeAtEnd(CHAT_PATH, formattedContent);
+    await writeAtEnd(CHATLOG_PATH, formattedContent);
     markSyncDirty();
 
     chatInput.value = '';
@@ -175,6 +176,7 @@ async function toggleMicRecording() {
             });
             const formattedContent = `\n- [ ] \`${timestamp}\` ![](media/${encodeLinkPath(fileName)})\n`;
             await writeAtEnd(CHAT_PATH, formattedContent);
+            await writeAtEnd(CHATLOG_PATH, formattedContent);
             markSyncDirty();
 
             chatIsClean = false;
@@ -590,6 +592,18 @@ function attachEventListeners() {
                 allMessages.forEach(message => message.classList.add('selected'));
             }
         }
+
+        // Copy the selected messages' text (no timestamps) on Cmd/Ctrl+C.
+        if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
+            const selected = chat.querySelectorAll('.message.selected');
+            if (selected.length > 0) {
+                const text = Array.from(selected)
+                    .map(m => m.querySelector('.message-content')?.dataset.text || '')
+                    .join('\n');
+                navigator.clipboard.writeText(text);
+                e.preventDefault();
+            }
+        }
     });
 
     chat.addEventListener('mousedown', function (e) {
@@ -896,34 +910,27 @@ function attachEventListeners() {
         btn.addEventListener('click', async function (e) {
             e.stopPropagation();
             const selectedMessages = document.querySelectorAll('.message.selected');
-            let msgs = [];
-            let messagesToRemove = [];
-            if (selectedMessages.length > 0) {
-                msgs = Array.from(selectedMessages).map(msg => msg.querySelector('.message-content').dataset.text);
-                messagesToRemove = selectedMessages;
-            } else {
-                msgs = [btn.closest('.message').querySelector('.message-content').dataset.text];
-                messagesToRemove = [btn.closest('.message')];
-            }
+            const messagesToRemove = selectedMessages.length > 0
+                ? Array.from(selectedMessages)
+                : [btn.closest('.message')];
 
-            const destinations = [];
+            const archive = archivePath();
             (async () => {
-                for (const msg of msgs) {
-                    const [header, body] = extractHeaderAndBody(msg, MAX_TITLE_LENGTH);
-                    const path = joinPath('/', btn.dataset.dir, sanitizeFilename(header)) + '.md';
-                    destinations.push(path);
-                    for (const msg of msgs) {
-                        await moveFromChat(msg, async () => {
-                            await write(path, body)
-                        });
-                    }
+                for (const el of messagesToRemove) {
+                    const text = el.querySelector('.message-content').dataset.text;
+                    const done = el.classList.contains('completed');
+                    const ts = el.dataset.timestamp;
+                    const line = `- [${done ? 'x' : ' '}] ${ts ? `\`${ts}\` ` : ''}${text}\n`;
+                    // Move each record out of chat into this year's archive.
+                    await moveFromChat(text, async () => {
+                        await writeAtEnd(archive, line);
+                    });
                 }
                 await renderMessages();
-                // Reload from disk - write() above creates new files (and
-                // possibly the archive/ dir itself) without touching the
-                // in-memory `files` map.
+                // Reload from disk - writeAtEnd created the file (and possibly
+                // the archive/ dir) without touching the in-memory `files` map.
                 files = await loadLocalFiles(await getRootDirHandle());
-                renderSidebar('', destinations);
+                renderSidebar('', [archive]);
             })();
 
             messagesToRemove.forEach(message => {

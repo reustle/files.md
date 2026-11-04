@@ -391,6 +391,7 @@ const WELCOME_FILES = {
             "| -------- | -------- |\n" +
             "| `[` | Insert a link to a file |\n" +
             "| `Cmd+K` / `Ctrl+K` | Open file search modal |\n" +
+            "| `Cmd+Shift+F` / `Ctrl+Shift+F` | Search in files |\n" +
             "| `Cmd+N` / `Ctrl+N` | New file |\n" +
             "| `Cmd+M` / `Ctrl+M` | Move file |\n" +
             "| `Cmd+D` / `Ctrl+D` | Delete file |\n" +

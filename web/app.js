@@ -6,7 +6,10 @@ const LATER_PATH = '/Later.md';
 const READ_PATH = '/Read.md';
 const SHOP_PATH = '/Shop.md';
 const WATCH_PATH = '/Watch.md';
-const LOG_PATH = '/archive/Log.txt';
+const LOG_PATH = '/archive/Log.md';
+const CHATLOG_PATH = '/archive/Chatlog.md';   // append-only log of everything added to chat
+// "To Archive" collects records here, one file per year
+const archivePath = () => `/archive/Archive ${new Date().getFullYear()}.md`;
 const OPEN_CHAT_AFTER_IDLE = 60 * 60 * 1000; // ms
 
 let openChatIdleTimer = null;
@@ -290,7 +293,7 @@ async function newFolder() {
 }
 
 function isMetaKey(event) {
-    return event.metaKey || event.ctrlKey || event.altKey;
+    return event.metaKey || event.ctrlKey;
 }
 
 function isSidebarToggleShortcut(event) {
@@ -774,6 +777,12 @@ window.addEventListener('keydown', async (event) => {
         searchModal.open();
     }
 
+    if (isMetaKey(event) && event.shiftKey && event.code === 'KeyF') {
+        event.preventDefault();
+        event.stopPropagation();
+        searchModal.open('', null, null, true);
+    }
+
     if (isMetaKey(event) && event.key === 'm') {
         event.preventDefault();
         event.stopPropagation();
@@ -813,6 +822,16 @@ document.addEventListener('keydown', (event) => {
 document.addEventListener('keydown', (event) => {
     // TODO cursor shouldn't jump to top once we hit "esc".
     if (event.key === 'Escape') {
+        // Close dialogs even if focus left them (e.g. after alt-tab)
+        const search = document.getElementById('search');
+        const move = document.getElementById('move');
+        if (search.style.display !== 'none' || move.style.display !== 'none') {
+            searchModal.close();
+            moveModal.close();
+            isChat ? chatInput.focus() : currentEditor.focus();
+            return;
+        }
+
         if (chatContainer.style.display !== 'none') {
             const selectedMessages = chat.querySelectorAll('.message.selected');
             if (selectedMessages.length > 0) {

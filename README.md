@@ -252,6 +252,7 @@ Place [AGENTS.md](https://github.com/zakirullin/cognitive-load/blob/main/web/AGE
 |----------------------------------------|------------------------------|
 | `[`                                    | Insert a link to a file      |  
 | `Cmd+K` / `Ctrl+K`                     | Open file search modal       |
+| `Cmd+Shift+F` / `Ctrl+Shift+F`         | Search in files              |
 | `Cmd+N` / `Ctrl+N`                     | New file                     |
 | `Cmd+M` / `Ctrl+M`                     | Move file                    |
 | `Cmd+D` / `Ctrl+D`                     | Delete file                  |
@@ -288,10 +289,11 @@ go run /abs/path/to/files.md/cmd/backlink/backlink.go
 ```
 
 ### Shift journal timestamps
-Shift timestamps in journal files by N hours (useful after timezone change):
+Shift `HH:MM` timestamps in journal files by N hours (useful after a timezone change). Point it at a single file or the whole `journal/` folder. Limit to a date range with `--from`/`--to` (`dd.mm.YYYY`, inclusive); preview with `--dry-run`:
 ```
-go run /abs/path/to/files.md/cmd/shifttime/shifttime.go
+go run /abs/path/to/files.md/cmd/shifttime/shifttime.go --hours 2 --from 09.08.2025 --to 13.09.2025 --dry-run /abs/path/to/files/journal/
 ```
+Drop `--dry-run` to write the changes. Omit `--from`/`--to` to shift every record in the file(s).
 
 ## Documentation
 [Deploy on your own server](docs/your-own-server.md)    
