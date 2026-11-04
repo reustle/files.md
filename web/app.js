@@ -26,10 +26,37 @@ function refreshWorkspaceControls() {
     for (const cm of [window.editor, window.editor2]) {
         if (cm) cm.setOption('readOnly', !writable || !cm.path);
     }
-    const message = document.getElementById('notes-empty-message');
-    if (message) message.textContent = writable
-        ? 'Choose a note from the sidebar, or create your first note.'
-        : 'Connect to a folder on disk before creating or editing notes.';
+    refreshNotesEmptyState();
+}
+
+function refreshNotesEmptyState() {
+    const empty = document.getElementById('notes-empty');
+    const notice = document.getElementById('connection-notice');
+    const writable = canModifyWorkspace();
+    const canPickFolder = typeof window.showDirectoryPicker === 'function';
+    document.getElementById('notes-empty-title').textContent = writable ? 'This folder is empty' : 'Open your notes';
+    document.getElementById('notes-empty-message').hidden = !writable;
+    document.getElementById('create-first-note').hidden = !writable;
+    document.getElementById('connect-notes-folder').hidden = writable || !canPickFolder;
+    if (!empty.hidden && !writable) {
+        // One explanation in the empty state, instead of a second floating banner.
+        document.getElementById('notes-empty-notice').appendChild(notice);
+        if (notice.hidden || !notice.textContent) {
+            notice.textContent = disconnectedWorkspaceMessage();
+            notice.hidden = false;
+        }
+    } else if (notice.parentElement !== document.body) {
+        document.body.appendChild(notice);
+    }
+}
+
+function disconnectedWorkspaceMessage() {
+    if (typeof window.showDirectoryPicker === 'function') {
+        return window.FILES_MD_LOCAL_SERVER
+            ? 'Open a folder on this device, or connect using your notes server’s access link.'
+            : 'Choose a folder to open your Markdown notes and start writing.';
+    }
+    return 'Open your notes server’s access link to connect this browser.';
 }
 
 function allowWorkspaceAction() {
@@ -104,7 +131,7 @@ async function init() {
                 notice.hidden = true;
             } else {
                 localStorage.removeItem(LAST_SERVER_OK_KEY);
-                notice.textContent = 'This browser is not connected to your notes folder. Open the server access link to connect. Creating and editing notes is disabled until connected.';
+                notice.textContent = disconnectedWorkspaceMessage();
                 notice.hidden = false;
             }
         } catch (error) {
@@ -197,6 +224,7 @@ async function openNotesHome({saveCurrent = true} = {}) {
         hideEditor2();
         document.getElementById('editor-container').style.display = 'none';
         document.getElementById('notes-empty').hidden = false;
+        refreshNotesEmptyState();
         renderSidebar();
     } finally {
         isMessingWithCurrentEditor = false;

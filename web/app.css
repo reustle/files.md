@@ -1109,13 +1109,59 @@ body:has(#move:not([style*="display: none"])) :is(#sidebar, #content) {
 }
 
 #notes-empty {
-    max-width: 640px;
-    margin: 8vh auto;
+    max-width: 420px;
+    margin: clamp(48px, 18vh, 180px) auto 48px;
     padding: 24px;
+    text-align: center;
 }
 
-#notes-empty p {
+#notes-empty .empty-folder-icon {
     color: var(--col-tx-alt);
+    margin-bottom: 16px;
+}
+
+#notes-empty h1 {
+    margin: 0 0 14px;
+    font-size: 2.6rem;
+    line-height: 1.25;
+}
+
+#notes-empty p,
+#notes-empty #connection-notice {
+    color: var(--col-tx-alt);
+    font-size: 1.5rem;
+    line-height: 1.65;
+    margin: 0 0 24px;
+}
+
+#notes-empty #connection-notice {
+    position: static;
+    transform: none;
+    width: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+}
+
+#notes-empty button:not([hidden]) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 8px 20px;
+    border: 1px solid var(--col-tx-alt);
+    border-radius: 6px;
+    background: var(--col-bg-alt);
+    color: var(--col-tx);
+    font: inherit;
+    font-size: 1.4rem;
+    cursor: pointer;
+}
+
+#notes-empty button:hover,
+#notes-empty button:focus-visible {
+    border-color: var(--col-tx);
 }
 
 #workspace-path {

@@ -194,6 +194,7 @@ function localSyncNotice(message) {
     const notice = document.getElementById('connection-notice');
     notice.textContent = message;
     notice.hidden = !message;
+    refreshNotesEmptyState();
 }
 
 function noteEditorContent(cm) {
@@ -458,6 +459,7 @@ async function applyNotesSnapshot(snapshot, resolved) {
     if (!window.editor?.path) {
         document.getElementById('notes-empty').hidden = false;
         document.getElementById('editor-container').style.display = 'none';
+        refreshNotesEmptyState();
     }
 }
 

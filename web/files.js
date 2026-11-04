@@ -1242,6 +1242,7 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
     isMessingWithCurrentEditor = true;
     try {
         document.getElementById('notes-empty').hidden = true;
+        refreshNotesEmptyState();
         document.getElementById('editor-container').style.display = 'block';
 
         const start = performance.now();

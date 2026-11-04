@@ -112,9 +112,14 @@
         </div>
     </div>
     <div id="notes-empty" hidden>
-        <h1>Your notes</h1>
-        <p id="notes-empty-message">Connect to a folder on disk before creating or editing notes.</p>
-        <button id="create-first-note" type="button" disabled onclick="newFile()">Create note</button>
+        <svg class="empty-folder-icon" width="48" height="48" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.25" d="M28 11v13a2 2 0 01-2 2H6a2 2 0 01-2-2V8a2 2 0 012-2h6c3 0 3 3 5 3h9a2 2 0 012 2z"/>
+        </svg>
+        <h1 id="notes-empty-title">Open your notes</h1>
+        <p id="notes-empty-message" hidden>Create your first note in this folder.</p>
+        <div id="notes-empty-notice"></div>
+        <button id="connect-notes-folder" type="button" hidden onclick="openDir()">Open folder</button>
+        <button id="create-first-note" type="button" hidden disabled onclick="newFile()">Create note</button>
     </div>
 </div>
 
