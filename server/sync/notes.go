@@ -128,11 +128,37 @@ func SyncNotes(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, change := range request.Writes {
 			if current, ok := snapshot.Files[change.Path]; ok && current.Content == change.Content {
+				if err := store.SyncNote(change.Path, fs.ContentVersion(change.Content)); err != nil {
+					http.Error(w, "Cannot confirm saved note; deletions not applied", http.StatusConflict)
+					return
+				}
 				continue
 			}
 			if err := store.WriteNote(change.Path, change.Content, change.Version); err != nil {
 				http.Error(w, "Note changed or could not be saved; deletions not applied", http.StatusConflict)
 				return
+			}
+		}
+		// A move is represented as destination writes followed by source
+		// deletions. Recheck every destination and source after all writes, so a
+		// concurrent external edit or failed destination durability check cannot
+		// turn a move into a source-only deletion. Other programs do not share our
+		// lock, so backups remain essential for the final filesystem race window.
+		if len(request.Deletes) > 0 {
+			for _, change := range request.Writes {
+				if err := store.CheckNoteVersion(change.Path, fs.ContentVersion(change.Content)); err != nil {
+					http.Error(w, "Move destination changed; deletions not applied", http.StatusConflict)
+					return
+				}
+			}
+			for _, change := range request.Deletes {
+				if _, err := store.ReadNote(change.Path); errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				if err := store.CheckNoteVersion(change.Path, change.Version); err != nil {
+					http.Error(w, "Note changed; deletions not applied", http.StatusConflict)
+					return
+				}
 			}
 		}
 		for _, change := range request.Deletes {

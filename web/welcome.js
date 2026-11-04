@@ -18,7 +18,10 @@ async function getTemporaryStorageDirHandle() {
         // A configured sync server must never receive demo data. Keep its
         // browser mirror separate from any previously seeded demo workspace.
         if (localStorage.getItem('apiUrl')) {
-            return await root.getDirectoryHandle('server-workspace-v2', {create: true});
+            // Tabs must not replace each other's browser mirror while either has
+            // unsent edits. Pending edits are restored from the durable journal.
+            const name = window.FILES_MD_LOCAL_SERVER ? 'server-tab-' + localMirrorID : 'server-workspace-v2';
+            return await root.getDirectoryHandle(name, {create: true});
         }
 
         // Skip the seed only when the LAST welcome file is already on disk.

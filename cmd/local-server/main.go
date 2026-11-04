@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/afero"
 	"github.com/zakirullin/files.md/server/config"
 	"github.com/zakirullin/files.md/server/fs"
+	"github.com/zakirullin/files.md/server/notewatch"
 	filesync "github.com/zakirullin/files.md/server/sync"
 )
 
@@ -60,6 +61,18 @@ func main() {
 		return fs.NewFS(notes, backend, 0)
 	}
 	config.ServerCfg.RequireSafeSync = true
+	watcher, err := notewatch.New(notes)
+	if err != nil {
+		panic(err)
+	}
+	defer watcher.Close()
+	filesync.SubscribeNoteChanges = func(userID int64) (<-chan struct{}, func(), error) {
+		if userID != 1 {
+			return nil, nil, fmt.Errorf("unknown local user")
+		}
+		changes, unsubscribe := watcher.Subscribe()
+		return changes, unsubscribe, nil
+	}
 	// The existing sync log format namespaces paths by numeric user ID.
 	logPath := func(name string) string {
 		rel, err := filepath.Rel(notes, name)

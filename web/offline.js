@@ -133,6 +133,10 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("fetch", (event) => {
+    // Authenticated state and endless event streams must always reach the server.
+    const requestURL = new URL(event.request.url);
+    if (requestURL.pathname === '/session' || requestURL.pathname.startsWith('/notes/') ||
+        requestURL.pathname === '/server-config.js' || requestURL.searchParams.has('token')) return;
     // Skip non-GET requests and extensions
     if (event.request.method !== 'GET' ||
         event.request.url.startsWith('chrome-extension:') ||
@@ -151,7 +155,7 @@ async function handleRequest(request) {
             // were partly loaded/cached :( It seems like Chromium fires
             // range requests for some files.
             if (response.status === 206) {
-                console.warn('⚠️ Partial content (206), not caching:', event.request.url);
+                console.warn('⚠️ Partial content (206), not caching:', request.url);
                 return response;
             }
 

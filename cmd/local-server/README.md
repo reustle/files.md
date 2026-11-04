@@ -10,7 +10,7 @@ Configure these environment variables:
 | `NOTES_DIR` | Existing notes directory, used directly rather than a user subdirectory |
 | `NOTES_BACKUP_DIR` | Backup directory outside `NOTES_DIR` |
 | `APP_URL`, `API_URL` | Browser-facing URL, including scheme and port |
-| `HTTP_ADDR` | HTTP listening address; defaults to `:8080` (all interfaces) |
+| `HTTP_ADDR` | HTTP listening address; set `0.0.0.0:8080` for remote development/testing |
 | `TOKENS_DIR` | Private directory for persistent login tokens |
 | `LOG_FILE` | Server log path |
 
@@ -25,9 +25,19 @@ workspace. Missing browser entries never imply deletion. Deletions require an
 explicit action and the last acknowledged server version; old clients are
 rejected before sync mutations.
 
-Visible browser tabs check the complete Markdown directory tree every two
-seconds, and again on focus. Adds, edits, renames and deletions made on disk
-appear without reloading. Content versions use SHA-256, so old or unchanged
+The backend uses [fsnotify](https://github.com/fsnotify/fsnotify) directory
+watches throughout the notes tree and pushes change notifications over an
+authenticated event stream. Directory watches handle editors that atomically
+replace files; new and moved directory trees are registered automatically.
+Notifications only request a complete safe snapshot: a watcher event never
+instructs a browser or the server to delete a file. Bursts are coalesced and slow
+tabs cannot block saves. Reconnects always request a fresh snapshot.
+
+Visible browser tabs also check the complete Markdown tree every two seconds,
+and again on focus. The backend repairs watches and sends a fallback notification
+every fifteen seconds, covering dropped events, watch limits, and filesystems
+without native notification support. Adds, edits, renames and deletions made on
+disk appear without reloading. Content versions use SHA-256, so old or unchanged
 modification times do not hide changes. An open, clean note updates in place;
 a dirty editor keeps its text until it can be saved safely.
 
@@ -56,12 +66,24 @@ their own backup mechanism (for example, Syncthing versioning for changes
 received from other devices). Writes are staged beside the note and renamed
 atomically, so readers do not see truncated contents. Version checks and backups
 reduce conflicts with other writers, but unrelated programs do not participate
-in a shared filesystem transaction.
+in a shared filesystem transaction. Power-loss durability also depends on the
+operating system, filesystem, and storage hardware; this is not a substitute for
+an independent backup of the notes directory.
+
+To recover a browser conflict, open the preserved Markdown note under
+`Conflicts/` and copy the wanted content into a new note. To recover an earlier
+server version or an explicitly deleted note, locate
+`NOTES_BACKUP_DIR/<relative-note-path>/<sha256>`: each version is the complete
+plain Markdown content, despite its extensionless name. Copy the chosen version
+into `NOTES_DIR` under a new, unused `.md` filename, then reconcile it in the app.
+Using a new filename keeps the current note available while you compare versions.
+These backups cover server mutations; use an independent backup/versioning tool
+for edits and deletions made by other programs.
 
 Run the regression checks from the repository root:
 
 ```sh
-go test ./...
+go test -race ./...
 go vet ./...
 npm ci --prefix tests
 npm run install:browsers --prefix tests

@@ -902,15 +902,21 @@ function getImageExtension(mimeType) {
 
 // TODO can we reuse moveFile?
 async function moveCurrentFile(toDir) {
-    const oldPath = currentEditor.path;
-    const newPath = joinPath('/', toDir, toFilename(currentEditor.path));
+    const cm = currentEditor;
+    const oldPath = cm.path;
+    const newPath = joinPath('/', toDir, toFilename(oldPath));
     if (oldPath === newPath) return;
-    if (await exists(newPath)) throw new Error('Destination already exists: ' + newPath);
-
+    while (isMessingWithCurrentEditor || isSyncingFiles || isSaving) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (cm.path !== oldPath) return;
     isMessingWithCurrentEditor = true;
+    const readOnly = cm.getOption('readOnly');
+    cm.setOption('readOnly', true);
 
     try {
-        let content = getCurrentContent();
+        if (await exists(newPath)) throw new Error('Destination already exists: ' + newPath);
+        const content = noteEditorContent(cm);
         await writeIfContentIsDifferent(newPath, content);
         // TODO move to saveTextFile?
         removeMemFile(oldPath);
@@ -925,14 +931,16 @@ async function moveCurrentFile(toDir) {
             handle: await getFileHandle(newPath),
         });
 
-        currentEditor.path = newPath;
         await remove(oldPath, {moveTo: newPath});
+        cm.path = newPath;
         await renderSidebar();
     } catch (error) {
         logError('Error moving file:', error);
+        showToast(error.message || 'Could not move the note');
+    } finally {
+        cm.setOption('readOnly', readOnly);
+        isMessingWithCurrentEditor = false;
     }
-
-    isMessingWithCurrentEditor = false;
 }
 
 // TODO lock on files modification?
@@ -965,16 +973,28 @@ function addMemFile(path, memFile) {
     // The directory order should stay as established by loadLocalFiles
 }
 
-async function moveFile(oldPath, newPath) {
+async function moveFile(oldPath, newPath, {lockHeld = false} = {}) {
     if (oldPath === newPath) {
         return;
     }
-    if (await exists(newPath)) throw new Error('Destination already exists: ' + newPath);
-
+    if (!lockHeld) {
+        while (isMessingWithCurrentEditor || isSyncingFiles || isSaving) {
+            await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        isMessingWithCurrentEditor = true;
+    }
+    const openEditors = [window.editor, window.editor2].filter(cm => cm?.path === oldPath);
+    const editorOptions = openEditors.map(cm => [cm, cm.getOption('readOnly')]);
+    for (const [cm] of editorOptions) cm.setOption('readOnly', true);
     try {
+        if (await exists(newPath)) throw new Error('Destination already exists: ' + newPath);
         let file = await (await getFileHandle(oldPath)).getFile();
-        let content = await file.text();
+        const dirtyEditor = openEditors.find(cm => !cm.isClean());
+        const pending = window.FILES_MD_LOCAL_SERVER && localDrafts[oldPath];
+        const content = dirtyEditor ? noteEditorContent(dirtyEditor)
+            : pending && !pending.deleted ? pending.content : await file.text();
         await writeIfContentIsDifferent(newPath, content);
+        if (pending?.editorTitle) stageLocalDraft(newPath, content, undefined, pending.editorTitle);
 
         log('saving ' + newPath);
         addMemFile(newPath, {
@@ -993,6 +1013,13 @@ async function moveFile(oldPath, newPath) {
         // Keep the destination in the same batch as the source deletion,
         // including when the moved file is open in an editor.
         await remove(oldPath, {moveTo: newPath});
+        for (const cm of openEditors) {
+            if (cm.getLine(0) === toHeader(toFilename(oldPath))) {
+                cm.replaceRange(toHeader(toFilename(newPath)), {line: 0, ch: 0},
+                    {line: 0, ch: cm.getLine(0).length}, 'remote');
+            }
+            cm.path = newPath;
+        }
         // delete files[oldDir][oldFilename];
         await renderSidebar();
 
@@ -1000,6 +1027,9 @@ async function moveFile(oldPath, newPath) {
     } catch (error) {
         logError('Error moving file:', error);
         throw error;
+    } finally {
+        for (const [cm, readOnly] of editorOptions) cm.setOption('readOnly', readOnly);
+        if (!lockHeld) isMessingWithCurrentEditor = false;
     }
 }
 
@@ -1104,6 +1134,19 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
         await new Promise(r => setTimeout(r, 50));
     }
 
+    if (window.FILES_MD_LOCAL_SERVER) {
+        const other = el === 'editor2-textarea' ? window.editor : window.editor2;
+        if (other?.path === path && path !== CHAT_PATH) {
+            // One editable buffer per note: independent split-pane buffers
+            // could otherwise replace each other's unsent per-note draft.
+            currentEditor = other;
+            if (other === window.editor2) showEditor2();
+            other.focus();
+            selectSidebarItem(path);
+            return;
+        }
+    }
+
     const id = opId();
     log(`Opening file: ${path} in element: ${el}, opId: ${id}`, id);
 
@@ -1159,7 +1202,8 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
         if (memFile.handle !== undefined) {
             const file = await memFile.handle.getFile();
             content = await file.text();
-            content = `${header}\n${content}`;
+            const draftTitle = window.FILES_MD_LOCAL_SERVER && localDrafts[path]?.editorTitle;
+            content = `${draftTitle || header}\n${content}`;
         } else {
             // We use welcome's files
             content = memFile.content;
@@ -1255,6 +1299,9 @@ async function syncCurrentFile(switchAwayEditor = false) {
         return;
     }
 
+    const savingEditor = currentEditor;
+    const getSavingContent = () => window.FILES_MD_LOCAL_SERVER ? noteEditorContent(savingEditor) : getCurrentContent();
+
     // Skip sync if we don't have a saved dir
     const savedDirHandle = await getRootDirHandle();
     const hasSavedDir = typeof FileSystemDirectoryHandle !== 'undefined' && savedDirHandle instanceof FileSystemDirectoryHandle;
@@ -1270,12 +1317,12 @@ async function syncCurrentFile(switchAwayEditor = false) {
         while (isSyncingFiles) await new Promise(resolve => setTimeout(resolve, 25));
     }
     // TODO replace with queues?
-    if (isMessingWithCurrentEditor) {
+    if (isMessingWithCurrentEditor || currentEditor !== savingEditor) {
         return;
     }
     isMessingWithCurrentEditor = true;
 
-    const path = currentEditor.path;
+    const path = savingEditor.path;
     let isCurrentEditorSame = () => {
         return path === window.currentEditor.path;
     }
@@ -1327,7 +1374,7 @@ async function syncCurrentFile(switchAwayEditor = false) {
     const filename = toFilename(path);
     try {
         // TODO track if no first line?
-        const firstLine = currentEditor.getValue().split('\n')[0];
+        const firstLine = savingEditor.getValue().split('\n')[0];
         const rawFromHeader = ucfirst(fromHeaderToFilename(firstLine));
         const badHeaderChar = findForbiddenChar(rawFromHeader);
         if (badHeaderChar !== null) {
@@ -1356,72 +1403,78 @@ async function syncCurrentFile(switchAwayEditor = false) {
 
         const hasFilenameChanged = newFilename.toLowerCase() !== filename.toLowerCase();
         if (hasFilenameChanged) {
-            log('Filename has changed from ', filename, 'to', newFilename);
+            const originalReadOnly = savingEditor.getOption('readOnly');
+            savingEditor.setOption('readOnly', true);
+            try {
+                log('Filename has changed from ', filename, 'to', newFilename);
 
-            const newPath = joinPath(toDirPath(path), newFilename);
+                const newPath = joinPath(toDirPath(path), newFilename);
 
 
-            // Do not delete existing files with same name. Compare names
-            // case-insensitively, as most local filesystems do.
-            let dirFiles = files;
-            for (const dir of toDirPath(path).split('/').filter(s => s !== '')) {
-                dirFiles = dirFiles && dirFiles[dir + '/'];
-            }
-            const nameTaken = dirFiles && Object.keys(dirFiles).some(
-                name => !name.endsWith('/') && name.toLowerCase() === newFilename.toLowerCase());
-            if (nameTaken) {
-                showToast(`File "${trimPostfix(newFilename, '.md')}" already exists`);
+                // Do not delete existing files with same name. Compare names
+                // case-insensitively, as most local filesystems do.
+                let dirFiles = files;
+                for (const dir of toDirPath(path).split('/').filter(s => s !== '')) {
+                    dirFiles = dirFiles && dirFiles[dir + '/'];
+                }
+                const nameTaken = dirFiles && Object.keys(dirFiles).some(
+                    name => !name.endsWith('/') && name.toLowerCase() === newFilename.toLowerCase());
+                if (nameTaken) {
+                    showToast(`File "${trimPostfix(newFilename, '.md')}" already exists`);
+                    isMessingWithCurrentEditor = false;
+                    return;
+                }
+
+                let content = getSavingContent();
+
+                // Probe the new path before deleting the old file. Sanitization should
+                // catch the common cases, but if the filesystem still rejects the name
+                // for any reason (reserved Windows names, length limits, …), we'd
+                // otherwise lose the file entirely.
+                let newHandle;
+                try {
+                    newHandle = await getFileHandle(newPath, true);
+                } catch (error) {
+                    logError('Cannot rename, filesystem rejected new name:', newPath, error);
+                    alert(`Cannot rename file to "${newFilename}": ${error.message || error.name}`);
+                    isMessingWithCurrentEditor = false;
+                    return;
+                }
+
+                // Change the file immediately, because on further await calls it can be synced by syncTexts.
+                savingEditor.path = newPath;
+
+                // Save the full destination before removing the source. Merely
+                // creating an empty handle is not evidence that writing succeeded.
+                content = getSavingContent();
+                try {
+                    await writeIfContentIsDifferent(newPath, content);
+                } catch (error) {
+                    savingEditor.path = path;
+                    throw error;
+                }
+
+                addMemFile(newPath, {
+                    isFile: true,
+                    content: content,
+                    lastModified: 0,
+                    path: newPath,
+                    handle: newHandle,
+                });
+                await remove(path, {moveTo: newPath});
+                log('Created', newPath);
+
+                await renderSidebar();
+
+                // Used further for syncing.
+                // filename = newFilename;
+
+                // Let's call it a day?
                 isMessingWithCurrentEditor = false;
                 return;
+            } finally {
+                savingEditor.setOption('readOnly', originalReadOnly);
             }
-
-            let content = getCurrentContent();
-
-            // Probe the new path before deleting the old file. Sanitization should
-            // catch the common cases, but if the filesystem still rejects the name
-            // for any reason (reserved Windows names, length limits, …), we'd
-            // otherwise lose the file entirely.
-            let newHandle;
-            try {
-                newHandle = await getFileHandle(newPath, true);
-            } catch (error) {
-                logError('Cannot rename, filesystem rejected new name:', newPath, error);
-                alert(`Cannot rename file to "${newFilename}": ${error.message || error.name}`);
-                isMessingWithCurrentEditor = false;
-                return;
-            }
-
-            // Change the file immediately, because on further await calls it can be synced by syncTexts.
-            currentEditor.path = newPath;
-
-            // Save the full destination before removing the source. Merely
-            // creating an empty handle is not evidence that writing succeeded.
-            content = getCurrentContent();
-            try {
-                await writeIfContentIsDifferent(newPath, content);
-            } catch (error) {
-                currentEditor.path = path;
-                throw error;
-            }
-
-            addMemFile(newPath, {
-                isFile: true,
-                content: content,
-                lastModified: 0,
-                path: newPath,
-                handle: newHandle,
-            });
-            await remove(path, {moveTo: newPath});
-            log('Created', newPath);
-
-            await renderSidebar();
-
-            // Used further for syncing.
-            // filename = newFilename;
-
-            // Let's call it a day?
-            isMessingWithCurrentEditor = false;
-            return;
         }
     } catch (error) {
         logError('Error during filename change:', error);
@@ -1434,7 +1487,7 @@ async function syncCurrentFile(switchAwayEditor = false) {
     // If in our memory we have actual TS, just write file back
     // If fs has fresher change, merge.
     // Sync with server.
-    const content = getCurrentContent();
+    const content = getSavingContent();
     let contentWasModifiedLocally = false;
     try {
         contentWasModifiedLocally = !await isContentEqual(path, content);
@@ -1451,14 +1504,14 @@ async function syncCurrentFile(switchAwayEditor = false) {
     }
 
     // Handling editor changes.
-    if (contentWasModifiedLocally && currentEditor.isClean()) {
+    if (contentWasModifiedLocally && savingEditor.isClean()) {
         log('Was modified locally, and the editor is clean', path);
 
         // Changes only from local system
         try {
             if (!switchAwayEditor) {
                 isMessingWithCurrentEditor = false;
-                const el = currentEditor === editor2 ? 'editor2-textarea' : 'editor-textarea';
+                const el = savingEditor === editor2 ? 'editor2-textarea' : 'editor-textarea';
                 await openFile(path, false, el);
             }
         } catch (error) {
@@ -1466,7 +1519,7 @@ async function syncCurrentFile(switchAwayEditor = false) {
             isMessingWithCurrentEditor = false;
             return;
         }
-    } else if (!currentEditor.isClean()) {
+    } else if (!savingEditor.isClean()) {
         log('Editor is not clean', path);
 
         isSaving = true;
@@ -1474,8 +1527,8 @@ async function syncCurrentFile(switchAwayEditor = false) {
             // const file = files[dir][filename];
             const file = getMemFile(path);
             if (file && file.handle) {
-                const freshContent = getCurrentContent();
-                if (!currentEditor.isClean() && contentWasModifiedLocally) {
+                const freshContent = getSavingContent();
+                if (!savingEditor.isClean() && contentWasModifiedLocally) {
                     // Changes from both sides: editor and local fs, need merging
 
                 }
@@ -1484,8 +1537,8 @@ async function syncCurrentFile(switchAwayEditor = false) {
                 // of our saving process. The new unsaved changes would be then handled by a subsequent saveCurrentFile() call.
                 // Initially, this flag assignment was erroneously placed at the end of the function, resulting in a race condition.
                 // If we override flag in the end, we would lose any changes that occurred during the 3 await calls.
-                if (window.FILES_MD_LOCAL_SERVER) stageLocalDraft(path, freshContent, currentEditor.noteVersion);
-                currentEditor.markClean();
+                if (window.FILES_MD_LOCAL_SERVER) stageLocalDraft(path, freshContent, savingEditor.noteVersion);
+                savingEditor.markClean();
                 const writable = await file.handle.createWritable();
                 await writable.write(freshContent);
                 // Buffer is flushed on disk at this moment. It could be interrupted
@@ -1502,8 +1555,8 @@ async function syncCurrentFile(switchAwayEditor = false) {
             isSaving = false;
             if (isCurrentEditorSame()) {
                 // Revert doc back to dirty state
-                editor.replaceRange(' ', editor.getCursor());
-                editor.undo();
+                savingEditor.replaceRange(' ', savingEditor.getCursor());
+                savingEditor.undo();
             }
             isMessingWithCurrentEditor = false;
             return;
@@ -1855,31 +1908,43 @@ function findSiblingPath(path) {
 }
 
 async function removeCurrentFile() {
-    const path = currentEditor.path;
-    if (path === CHAT_PATH) {
-        return;
+    const cm = currentEditor;
+    const path = cm?.path;
+    if (!path || path === CHAT_PATH) return;
+    while (isMessingWithCurrentEditor || isSyncingFiles || isSaving) {
+        await new Promise(resolve => setTimeout(resolve, 25));
     }
-
+    if (cm.path !== path) return;
+    const permanent = toDirPath(path) === '/archive';
+    if (permanent && !confirm(`Permanently delete "${toFilename(path)}"?`)) return;
     const nextFilePath = findSiblingPath(path);
-
-    let oldPath = path;
-    let newPath = '/archive/' + toFilename(path);
-
-    currentEditor.path = undefined;
-    if (toDirPath(path) === '/archive') {
-        log('Removing file permanently', path);
-        await remove(oldPath);
-    } else {
-        log('Moving file to archive', path);
-        await moveFile(oldPath, newPath);
+    const readOnly = cm.getOption('readOnly');
+    isMessingWithCurrentEditor = true;
+    cm.setOption('readOnly', true);
+    try {
+        if (permanent) {
+            await remove(path);
+        } else {
+            const destination = '/archive/' + toFilename(path);
+            if (await exists(destination)) throw new Error('Destination already exists: ' + destination);
+            // Archive the visible editor contents, including edits made before
+            // the autosave timer fires. A failed move must leave the editor open.
+            if (!cm.isClean()) await writeIfContentIsDifferent(path, noteEditorContent(cm));
+            await moveFile(path, destination, {lockHeld: true});
+        }
+        cm.path = undefined;
+    } catch (error) {
+        logError('Cannot archive or delete note:', error);
+        showToast(error.message || 'Could not archive or delete the note');
+        return;
+    } finally {
+        cm.setOption('readOnly', readOnly);
+        isMessingWithCurrentEditor = false;
     }
-
     await renderSidebar();
-    if (nextFilePath) {
-        await openFile(nextFilePath);
-    } else {
-        openRandomFile();
-    }
+    if (currentEditor !== cm) return;
+    if (nextFilePath) await openFile(nextFilePath);
+    else await openRandomFile();
 }
 
 async function openRandomFile() {

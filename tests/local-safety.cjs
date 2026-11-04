@@ -9,6 +9,7 @@ const net = require('node:net');
 const {spawn, execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const assert = require('node:assert/strict');
+const verifyArchiveSafety = require('./archive-safety.cjs');
 
 const repo = path.resolve(__dirname, '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -37,7 +38,7 @@ async function availablePort() {
     const socket = net.createServer();
     await new Promise((resolve, reject) => {
         socket.once('error', reject);
-        socket.listen(0, '127.0.0.1', resolve);
+        socket.listen(0, '0.0.0.0', resolve);
     });
     const port = socket.address().port;
     await new Promise(resolve => socket.close(resolve));
@@ -298,6 +299,220 @@ async function verifyFolderOperations(page, notes) {
     assert.equal(refusedOverwrite, true);
 }
 
+async function verifyFocusDuringRename(page, notes) {
+    await page.evaluate(async () => {
+        clearInterval(window.saver);
+        await write('/Focus source.md', 'Source body');
+        await write('/Focus other.md', 'Other pane body');
+        await syncLocalNotes();
+        await openFile('/Focus source.md');
+        await openFile('/Focus other.md', false, 'editor2-textarea');
+        currentEditor = editor;
+        editor.focus();
+        editor.setValue('# Focus renamed\nSource body');
+        const original = getFileHandle;
+        let release, arrived;
+        const gate = new Promise(resolve => { release = resolve; });
+        const reached = new Promise(resolve => { arrived = resolve; });
+        let held = false;
+        getFileHandle = async (path, create) => {
+            if (path === '/Focus renamed.md' && create && !held) {
+                held = true; arrived(); await gate;
+            }
+            return original(path, create);
+        };
+        try {
+            const saving = syncCurrentFile();
+            await reached;
+            editor2.focus();
+            await new Promise(resolve => setTimeout(resolve, 50));
+            if (currentEditor !== editor) throw new Error('Focus changed the editor during rename');
+            release();
+            await saving;
+        } finally { release(); getFileHandle = original; }
+        await syncLocalNotes();
+        currentEditor.markClean();
+        await openChat();
+    });
+    assert.equal(await fs.readFile(path.join(notes, 'Focus renamed.md'), 'utf8'), 'Source body');
+    assert.equal(await fs.readFile(path.join(notes, 'Focus other.md'), 'utf8'), 'Other pane body');
+    await assert.rejects(fs.stat(path.join(notes, 'Focus source.md')), {code: 'ENOENT'});
+}
+
+async function verifyTitleRecoveryAndSplitPane(page, notes) {
+    await page.evaluate(async () => {
+        await write('/Title crash.md', 'Body survives title changes');
+        await syncLocalNotes();
+        clearInterval(window.saver);
+        await openFile('/Title crash.md');
+        currentEditor.replaceRange('Recovered title', {line: 0, ch: 2}, {line: 0, ch: currentEditor.getLine(0).length});
+        const source = currentEditor;
+        await openFile('/Title crash.md', false, 'editor2-textarea');
+        if (currentEditor !== source) throw new Error('Same note opened in a second independent buffer');
+        await syncLocalNotes(); // Acknowledged body must not discard pending title metadata.
+        if (localDrafts['/Title crash.md']?.editorTitle !== '# Recovered title') throw new Error('Pending title was discarded');
+    });
+    await page.reload();
+    await waitForSync(page);
+    await page.evaluate(async () => {
+        clearInterval(window.saver);
+        await openFile('/Title crash.md');
+        if (currentEditor.getLine(0) !== '# Recovered title') throw new Error('Title did not survive reload');
+        await syncCurrentFile();
+        await syncLocalNotes();
+        currentEditor.markClean();
+        await openChat();
+    });
+    assert.equal(await fs.readFile(path.join(notes, 'Recovered title.md'), 'utf8'), 'Body survives title changes');
+    await assert.rejects(fs.stat(path.join(notes, 'Title crash.md')), {code: 'ENOENT'});
+}
+
+async function verifyInflightEdits(page, notes) {
+    await page.evaluate(async () => {
+        clearInterval(window.saver);
+        await openFile('/Hash.md');
+        const originalFetch = window.fetch;
+        let release, arrived;
+        const gate = new Promise(resolve => { release = resolve; });
+        const reached = new Promise(resolve => { arrived = resolve; });
+        let held = false;
+        window.fetch = async (...args) => {
+            const response = await originalFetch(...args);
+            if (String(args[0]).endsWith('/notes/sync') && !held) {
+                held = true;
+                arrived();
+                await gate;
+            }
+            return response;
+        };
+        try {
+            currentEditor.setValue('# Hash\nFirst in-flight edit');
+            const saving = syncLocalNotes();
+            await reached;
+            currentEditor.setValue('# Hash\nNewest in-flight edit');
+            release();
+            await saving;
+            if (localDrafts['/Hash.md']?.content !== 'Newest in-flight edit') throw new Error('Response discarded newer typing');
+        } finally { release(); window.fetch = originalFetch; }
+        await syncCurrentFile();
+        await openChat();
+    });
+    assert.equal(await fs.readFile(path.join(notes, 'Hash.md'), 'utf8'), 'Newest in-flight edit');
+    await page.evaluate(async () => {
+        await write('/Recreated.md', 'Original before deletion');
+        await syncLocalNotes();
+        await remove('/Recreated.md');
+        const originalFetch = window.fetch;
+        let release, arrived;
+        const gate = new Promise(resolve => { release = resolve; });
+        const reached = new Promise(resolve => { arrived = resolve; });
+        let held = false;
+        window.fetch = async (...args) => {
+            const response = await originalFetch(...args);
+            if (String(args[0]).endsWith('/notes/sync') && !held) {
+                held = true; arrived(); await gate;
+            }
+            return response;
+        };
+        try {
+            const deleting = syncLocalNotes();
+            await reached;
+            await write('/Recreated.md', 'Recreated while deletion was in flight');
+            release();
+            await deleting;
+            if (localDrafts['/Recreated.md']?.content !== 'Recreated while deletion was in flight') throw new Error('Response discarded recreated note');
+        } finally { release(); window.fetch = originalFetch; }
+        await syncLocalNotes();
+    });
+    assert.equal(await fs.readFile(path.join(notes, 'Recreated.md'), 'utf8'), 'Recreated while deletion was in flight');
+}
+
+async function verifyPushEvents(page, notes) {
+    await page.waitForFunction(() => localWatchConnected);
+    await page.evaluate(async () => {
+        clearInterval(localSyncTimer);
+        clearInterval(window.saver);
+        await openChat();
+    });
+    try {
+        await fs.writeFile(path.join(notes, 'Pushed.md'), 'Pushed without browser polling');
+        await page.waitForFunction(() => getMemFile('/Pushed.md'), null, {timeout: 5000});
+        assert.equal(await page.evaluate(() => read('/Pushed.md')), 'Pushed without browser polling');
+        await page.evaluate(() => localWatchController.abort());
+        await page.waitForFunction(() => !localWatchConnected);
+        await fs.writeFile(path.join(notes, 'Pushed.md'), 'Changed during reconnect');
+        await page.waitForFunction(() => localWatchConnected);
+        await page.waitForFunction(async () => await read('/Pushed.md') === 'Changed during reconnect');
+    } finally {
+        await page.evaluate(() => {
+            localSyncTimer = setInterval(() => { if (!isSyncingFiles) syncLocalNotes().catch(() => {}); }, 2000);
+        });
+    }
+}
+
+async function verifyDurableConcurrentDrafts(page, notes) {
+    await fs.writeFile(path.join(notes, 'Concurrent.md'), 'Original concurrent note');
+    await page.waitForFunction(() => !isSyncingFiles && getMemFile('/Concurrent.md'));
+    const context = page.context();
+    const first = await context.newPage();
+    const second = await context.newPage();
+    for (const tab of [first, second]) {
+        await tab.goto(page.url());
+        await waitForSync(tab);
+        await tab.evaluate(async () => {
+            clearInterval(window.saver);
+            await openFile('/Concurrent.md');
+        });
+    }
+    await context.route('**/notes/sync', route => route.abort());
+    await context.route('**/notes/events', route => route.abort());
+    for (const [tab, content] of [[first, 'First tab unsaved keystrokes'], [second, 'Second tab unsaved keystrokes']]) {
+        const durable = await tab.evaluate(content => {
+            currentEditor.setValue('# Concurrent\n' + content);
+            return Object.keys(localStorage).some(key => key.startsWith(LOCAL_JOURNAL_PREFIX) &&
+                JSON.parse(localStorage.getItem(key)).draft.content === content);
+        }, content);
+        assert.equal(durable, true, 'Typing must reach durable storage before autosave or unload');
+    }
+    // Close without beforeunload: a crash/mobile eviction need not run it.
+    await first.close({runBeforeUnload: false});
+    await second.close({runBeforeUnload: false});
+    await page.reload();
+    await page.waitForFunction(() => !isSyncingFiles && Object.keys(localDrafts).length >= 2);
+    const recovered = await page.evaluate(() => Object.values(localDrafts).map(draft => draft.content));
+    assert.ok(recovered.includes('First tab unsaved keystrokes'));
+    assert.ok(recovered.includes('Second tab unsaved keystrokes'));
+    await context.unroute('**/notes/sync');
+    await context.unroute('**/notes/events');
+    await page.evaluate(() => syncLocalNotes());
+    const saved = Object.values(await snapshot(notes));
+    assert.ok(saved.includes('First tab unsaved keystrokes'));
+    assert.ok(saved.includes('Second tab unsaved keystrokes'));
+}
+
+async function verifyStorageFailure(page) {
+    await page.evaluate(async () => {
+        clearInterval(window.saver);
+        await openFile('/Hash.md');
+    });
+    const result = await page.evaluate(() => {
+        const original = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+            if (key.startsWith(LOCAL_JOURNAL_PREFIX)) throw new DOMException('Quota exceeded', 'QuotaExceededError');
+            return original.call(this, key, value);
+        };
+        try {
+            currentEditor.setValue('# Hash\nKeep this text when storage fails');
+            return {content: currentEditor.getValue(), failed: localDraftStorageFailed,
+                notice: document.getElementById('connection-notice').textContent};
+        } finally { Storage.prototype.setItem = original; }
+    });
+    assert.equal(result.failed, true);
+    assert.match(result.notice, /Keep this tab open/);
+    assert.match(result.content, /Keep this text/);
+    await page.evaluate(async () => { await syncCurrentFile(); await openChat(); });
+}
+
 async function runCase(binary, browserType, volatile, empty) {
     const label = `${browserType.name()} / ${volatile ? 'forced memory' : 'default storage'} / ${empty ? 'empty' : 'existing'} folder`;
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'files-md-safety-'));
@@ -316,7 +531,7 @@ async function runCase(binary, browserType, volatile, empty) {
         cwd: root,
         env: {
             ...process.env,
-            HTTP_ADDR: `127.0.0.1:${port}`, APP_URL: url, API_URL: url,
+            HTTP_ADDR: `0.0.0.0:${port}`, APP_URL: url, API_URL: url,
             NOTES_DIR: notes, NOTES_BACKUP_DIR: path.join(root, 'backups'),
             TOKENS_DIR: path.join(root, 'tokens'), STORAGE_DIR: path.join(root, 'storage'),
             LOG_FILE: path.join(root, 'server.log'),
@@ -332,9 +547,11 @@ async function runCase(binary, browserType, volatile, empty) {
     let passed = false;
     try {
         await waitForServer(child, url, root);
+        const listeners = await promisify(execFile)('ss', ['-ltn']);
+        assert.ok(listeners.stdout.includes(`0.0.0.0:${port}`), 'Test server must listen on all IPv4 interfaces');
         const executablePath = browserType === chromium ? process.env.CHROMIUM_BIN : process.env.FIREFOX_BIN;
         browser = await browserType.launch({headless: true, ...(executablePath ? {executablePath} : {})});
-        const context = await browser.newContext({serviceWorkers: 'block'});
+        const context = await browser.newContext({serviceWorkers: browserType === chromium && !volatile && !empty ? 'allow' : 'block'});
         if (volatile) {
             await context.addInitScript(() => {
                 Object.defineProperty(FileSystemFileHandle.prototype, 'createWritable', {value: undefined, configurable: true});
@@ -358,6 +575,12 @@ async function runCase(binary, browserType, volatile, empty) {
         await page.goto((await fs.readFile(path.join(root, 'login-url'), 'utf8')).trim());
         await waitForSync(page);
         assert.equal(await page.locator('#connection-notice').isVisible(), false);
+        if (browserType === chromium && !volatile && !empty) {
+            await page.evaluate(() => navigator.serviceWorker.ready);
+            await page.reload();
+            await waitForSync(page);
+            assert.equal(await page.evaluate(() => !!navigator.serviceWorker.controller), true);
+        }
         await assertNoSamples(page);
         assert.deepEqual(await snapshot(notes), baseline, 'Startup changed the supplied folder');
 
@@ -492,6 +715,13 @@ async function runCase(binary, browserType, volatile, empty) {
             await verifyNestedFolders(page, notes);
             await verifyFolderOperations(page, notes);
             await verifyExactContents(page, notes);
+            await verifyFocusDuringRename(page, notes);
+            await verifyTitleRecoveryAndSplitPane(page, notes);
+            await verifyInflightEdits(page, notes);
+            await verifyPushEvents(page, notes);
+            await verifyStorageFailure(page);
+            await verifyDurableConcurrentDrafts(page, notes);
+            await verifyArchiveSafety(page, notes);
         }
         if (browserType === chromium && !volatile && !empty) await verifyFolderPicker(page);
         assert.deepEqual(errors, []);

@@ -1,5 +1,36 @@
 # End-to-end tests
 
+## Local notes safety suite
+
+Use this suite for the standalone local notes server. It builds its own server
+and uses disposable workspaces, backups, tokens, and ports. No `.env`, Telegram
+account, or existing notes directory is needed.
+
+```sh
+go vet ./...
+go test -race ./...
+npm ci --prefix tests
+cd tests
+npx playwright install --with-deps chromium firefox
+npm run test:safety
+```
+
+The browser matrix covers Chromium and Firefox, native and in-memory file
+storage, and empty and populated workspaces. Assertions check actual note and
+backup contents on disk, as well as browser state. Failed fixtures and logs are
+retained under `/tmp/files-md-safety-*`; successful fixtures are cleaned up.
+Set `BROWSER=chromium` or `BROWSER=firefox` to narrow the matrix.
+
+The `Notes safety` GitHub Actions workflow runs race-enabled Go tests, vet,
+and both browser variants on pushes and pull requests. See
+[`cmd/local-server/README.md`](../cmd/local-server/README.md) for the storage
+contract and recovery information.
+
+## Legacy application suite
+
+The remaining instructions exercise the original Telegram/application sync
+protocol. They are separate from the standalone local notes safety suite above.
+
 ## One-time setup
 
 Create a `.env` file in the project root:

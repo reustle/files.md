@@ -79,12 +79,21 @@ func (fs FS) ReadNote(name string) (Note, error) {
 	if err != nil {
 		return Note{}, err
 	}
+	// Check before opening: opening a FIFO named *.md can otherwise block the
+	// whole sync server while it waits indefinitely for a writer.
+	info, err := fs.backend.Stat(full)
+	if err != nil {
+		return Note{}, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 5<<20 {
+		return Note{}, fmt.Errorf("unsupported note size or type: %s", name)
+	}
 	file, err := fs.backend.Open(full)
 	if err != nil {
 		return Note{}, err
 	}
 	defer file.Close()
-	info, err := file.Stat()
+	info, err = file.Stat()
 	if err != nil {
 		return Note{}, err
 	}
@@ -159,6 +168,38 @@ func (fs FS) CheckNoteVersion(name, expected string) error {
 	return nil
 }
 
+// SyncNote makes a same-content retry durable before it is acknowledged. A
+// previous rename may have succeeded even though its directory sync failed.
+func (fs FS) SyncNote(name, expected string) error {
+	if err := fs.CheckNoteVersion(name, expected); err != nil {
+		return err
+	}
+	full, err := fs.notePath(name)
+	if err != nil {
+		return err
+	}
+	file, err := fs.backend.Open(full)
+	if err != nil {
+		return err
+	}
+	err = file.Sync()
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	for dir := filepath.Dir(full); ; dir = filepath.Dir(dir) {
+		if err := syncDirectory(fs.backend, dir); err != nil {
+			return err
+		}
+		if dir == fs.rootPath || dir == filepath.Dir(dir) {
+			return nil
+		}
+	}
+}
+
 // Stage complete contents beside the target, then rename. Readers never see a
 // truncated file. Recheck after staging to catch edits from outside this server.
 func (fs FS) WriteNote(name, content, expected string) error {
@@ -166,8 +207,8 @@ func (fs FS) WriteNote(name, content, expected string) error {
 	if err != nil {
 		return err
 	}
-	if len(content) > 5<<20 {
-		return fmt.Errorf("note is too large")
+	if len(content) > 5<<20 || !utf8.ValidString(content) {
+		return fmt.Errorf("note must be UTF-8 text under 5 MB")
 	}
 	if err := fs.CheckNoteVersion(name, expected); err != nil {
 		return err
@@ -180,9 +221,12 @@ func (fs FS) WriteNote(name, content, expected string) error {
 		return err
 	}
 	defer fs.backend.Remove(tmp.Name())
-	if _, err := tmp.WriteString(content); err != nil {
+	if n, err := tmp.WriteString(content); err != nil {
 		tmp.Close()
 		return err
+	} else if n != len(content) {
+		tmp.Close()
+		return io.ErrShortWrite
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()

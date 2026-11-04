@@ -157,3 +157,136 @@ func TestNotesExplicitDirectoryOperationsKeepUnlistedFiles(t *testing.T) {
 	require.Equal(t, 200, code)
 	require.Contains(t, result.Files, "Moved/Note.md", "folder cleanup is never recursive")
 }
+
+func TestNotesEmptyRequestsAndRetriedWritesNeverInferDeletions(t *testing.T) {
+	_, store, call := notesFixture(t)
+	require.NoError(t, store.WriteNote("Unlisted.md", "keep forever", ""))
+	request := notesRequest{Writes: []noteChange{{Path: "Draft.md", Content: "saved once"}}}
+	for i := 0; i < 20; i++ {
+		// The client has no inventory in a fresh/cleared browser, and a lost
+		// acknowledgement causes the old create request to be sent again.
+		code, result := call(notesRequest{})
+		require.Equal(t, 200, code)
+		require.Equal(t, "keep forever", result.Files["Unlisted.md"].Content)
+		code, result = call(request)
+		require.Equal(t, 200, code)
+		require.Empty(t, result.Conflicts)
+		require.Len(t, result.Files, 2)
+		require.Equal(t, "keep forever", result.Files["Unlisted.md"].Content)
+		require.Equal(t, "saved once", result.Files["Draft.md"].Content)
+	}
+}
+
+type afterNoteRenameFS struct {
+	afero.Fs
+	after func(string) error
+}
+
+func (f afterNoteRenameFS) Rename(oldname, newname string) error {
+	if err := f.Fs.Rename(oldname, newname); err != nil {
+		return err
+	}
+	return f.after(newname)
+}
+
+func TestNotesInterruptedMoveCanBeRetriedWithoutLosingSource(t *testing.T) {
+	root, store, call := notesFixture(t)
+	require.NoError(t, store.WriteNote("Source.md", "valuable", ""))
+	failed := false
+	backend := afterNoteRenameFS{Fs: afero.NewOsFs(), after: func(name string) error {
+		if filepath.Base(name) == "Destination.md" && !failed {
+			failed = true
+			return os.ErrPermission // Rename happened, but durability acknowledgement failed.
+		}
+		return nil
+	}}
+	store, err := fs.NewFS(root, &fs.VersionedOSFS{Fs: backend, Root: root, BackupDir: t.TempDir()})
+	require.NoError(t, err)
+	fs.NewUserFS = func(int64) (*fs.FS, error) { return store, nil }
+	request := notesRequest{
+		Writes:  []noteChange{{Path: "Destination.md", Content: "valuable"}},
+		Deletes: []noteChange{{Path: "Source.md", Version: fs.ContentVersion("valuable")}},
+	}
+	code, _ := call(request)
+	require.Equal(t, 409, code)
+	for _, name := range []string{"Source.md", "Destination.md"} {
+		note, err := store.ReadNote(name)
+		require.NoError(t, err)
+		require.Equal(t, "valuable", note.Content)
+	}
+	for i := 0; i < 3; i++ {
+		code, result := call(request)
+		require.Equal(t, 200, code)
+		require.Len(t, result.Files, 1)
+		require.Equal(t, "valuable", result.Files["Destination.md"].Content)
+	}
+}
+
+func TestNotesMoveRechecksAllContentsBeforeAnyDeletion(t *testing.T) {
+	for _, changed := range []string{"Destination.md", "Second.md"} {
+		t.Run(changed, func(t *testing.T) {
+			root, store, call := notesFixture(t)
+			for _, name := range []string{"Source.md", "Second.md"} {
+				require.NoError(t, store.WriteNote(name, "valuable", ""))
+			}
+			backend := afterNoteRenameFS{Fs: afero.NewOsFs(), after: func(string) error {
+				return os.WriteFile(filepath.Join(root, changed), []byte("external edit"), 0600)
+			}}
+			store, err := fs.NewFS(root, &fs.VersionedOSFS{Fs: backend, Root: root, BackupDir: t.TempDir()})
+			require.NoError(t, err)
+			fs.NewUserFS = func(int64) (*fs.FS, error) { return store, nil }
+			code, _ := call(notesRequest{
+				Writes: []noteChange{{Path: "Destination.md", Content: "valuable"}},
+				Deletes: []noteChange{
+					{Path: "Source.md", Version: fs.ContentVersion("valuable")},
+					{Path: "Second.md", Version: fs.ContentVersion("valuable")},
+				},
+			})
+			require.Equal(t, 409, code)
+			for _, name := range []string{"Source.md", "Second.md"} {
+				_, err := store.ReadNote(name)
+				require.NoError(t, err, "no source deletion may run after a destination or source changed")
+			}
+		})
+	}
+}
+
+type failConfirmSyncFS struct {
+	afero.Fs
+	name string
+}
+
+func (f failConfirmSyncFS) Open(name string) (afero.File, error) {
+	file, err := f.Fs.Open(name)
+	if err != nil || name != f.name {
+		return file, err
+	}
+	return failConfirmSyncFile{file}, nil
+}
+
+type failConfirmSyncFile struct{ afero.File }
+
+func (f failConfirmSyncFile) Sync() error { return os.ErrPermission }
+
+func TestNotesRetryRequiresDurableDestinationBeforeDeletingSource(t *testing.T) {
+	for _, failAt := range []string{"Destination.md", "."} {
+		t.Run(failAt, func(t *testing.T) {
+			root, store, call := notesFixture(t)
+			for _, name := range []string{"Source.md", "Destination.md"} {
+				require.NoError(t, store.WriteNote(name, "valuable", ""))
+			}
+			backend := failConfirmSyncFS{Fs: afero.NewOsFs(), name: filepath.Join(root, failAt)}
+			store, err := fs.NewFS(root, &fs.VersionedOSFS{Fs: backend, Root: root, BackupDir: t.TempDir()})
+			require.NoError(t, err)
+			fs.NewUserFS = func(int64) (*fs.FS, error) { return store, nil }
+			code, _ := call(notesRequest{
+				Writes:  []noteChange{{Path: "Destination.md", Content: "valuable"}},
+				Deletes: []noteChange{{Path: "Source.md", Version: fs.ContentVersion("valuable")}},
+			})
+			require.Equal(t, 409, code)
+			note, err := store.ReadNote("Source.md")
+			require.NoError(t, err)
+			require.Equal(t, "valuable", note.Content)
+		})
+	}
+}

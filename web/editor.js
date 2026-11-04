@@ -67,10 +67,20 @@ function initEditor(el) {
     });
     newEditor.setSize(null, '100%');
     newEditor.on('focus', function() {
-        currentEditor = newEditor; // FIXME possible RC here? If isMessingWithCurrentEditor is hold, this would overwrite
-        currentEditor.refresh(); // Cursor & hide tokens conflict if we don't call it
-        closeChatModal();
-        log('Focused to:', newEditor.path);
+        const activate = () => {
+            if (!newEditor.hasFocus()) return;
+            // Rename/save operations capture one editor. Focusing another pane
+            // must not change the source halfway through awaited disk writes.
+            if (isMessingWithCurrentEditor || isSaving) {
+                setTimeout(activate, 25);
+                return;
+            }
+            currentEditor = newEditor;
+            currentEditor.refresh();
+            closeChatModal();
+            log('Focused to:', newEditor.path);
+        };
+        activate();
     });
 
     newEditor.hmdResolveURL = function (path) {
@@ -242,7 +252,14 @@ function initEditor(el) {
 
     // Edits flip the sync dot to "unsynced" until the server acks them.
     // Programmatic loads (openFile's setValue) are not user edits.
-    newEditor.on('change', function () {
+    newEditor.on('change', function (cm, change) {
+        if (change.origin === 'remote') return;
+        if (window.FILES_MD_LOCAL_SERVER && cm.path && cm.path !== CHAT_PATH &&
+            (!isMessingWithCurrentEditor || change.origin !== 'setValue')) {
+            // Persist every edit synchronously: crashes and mobile tab eviction
+            // need not deliver beforeunload or wait for the autosave interval.
+            try { stageLocalDraft(cm.path, noteEditorContent(cm), cm.noteVersion, cm.getLine(0)); } catch {}
+        }
         if (isMessingWithCurrentEditor) return;
         markSyncDirty();
     });

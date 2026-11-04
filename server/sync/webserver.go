@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"runtime/debug"
@@ -65,7 +66,14 @@ func Serve(apiHost, appHost, certDir, logFilename string) {
 		}
 
 		serverLogger.Printf("Starting HTTP server on %s", srv.Addr)
-		err := srv.ListenAndServe()
+		network := "tcp"
+		if host, _, err := net.SplitHostPort(srv.Addr); err == nil && host == "0.0.0.0" {
+			network = "tcp4"
+		}
+		listener, err := net.Listen(network, srv.Addr)
+		if err == nil {
+			err = srv.Serve(listener)
+		}
 		if err != nil {
 			panic(err)
 		}
@@ -106,6 +114,8 @@ func router(serverLogger *log.Logger) *http.ServeMux {
 		})
 		r.HandleFunc("/session", SessionStatus)
 		r.HandleFunc("/notes/sync", corsMiddleware(panicMiddleware(tokenMiddleware(gzipMiddleware(SyncNotes)))))
+		// Streaming responses must bypass gzip buffering and the save mutex.
+		r.HandleFunc("/notes/events", corsMiddleware(panicMiddleware(NotesEvents)))
 	}
 
 	// TODO add hashing or secrets

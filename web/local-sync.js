@@ -1,7 +1,62 @@
 // Local-server sync uses complete directory snapshots and SHA-256 versions.
 // Browser absence never asks the server to delete a file. Only remove() does.
 const LOCAL_DRAFT_KEY = 'notes-drafts-v3:' + API_URL;
-let localDrafts = JSON.parse(localStorage.getItem(LOCAL_DRAFT_KEY) || '{}');
+const LOCAL_JOURNAL_PREFIX = LOCAL_DRAFT_KEY + ':entry:';
+const localMirrorID = (() => {
+    const key = 'notes-mirror-tab:' + API_URL;
+    const fresh = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    try {
+        // Reload preserves cached notes for offline reading. A duplicated tab
+        // navigates independently and receives a separate browser mirror.
+        const reloading = performance.getEntriesByType('navigation')[0]?.type === 'reload';
+        const id = reloading && sessionStorage.getItem(key) || fresh;
+        sessionStorage.setItem(key, id);
+        return id;
+    } catch { return fresh; }
+})();
+const persistedDraftEntries = new Map();
+let localDraftStorageFailed = false;
+let malformedLegacyDrafts = false;
+let localDrafts = readLocalDrafts();
+
+function readLocalDrafts() {
+    const drafts = {};
+    // Each pending edit has its own record. A second tab cannot overwrite an
+    // entire shared draft map and silently erase the first tab's offline work.
+    const entries = [];
+    const legacy = localStorage.getItem(LOCAL_DRAFT_KEY);
+    if (legacy) {
+        try { entries.push(...Object.entries(JSON.parse(legacy))); } catch {
+            localDraftStorageFailed = true; // Retain malformed data for recovery.
+            malformedLegacyDrafts = true;
+        }
+    }
+    for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key.startsWith(LOCAL_JOURNAL_PREFIX)) continue;
+        try {
+            const record = JSON.parse(localStorage.getItem(key));
+            if (typeof record.path !== 'string' || !record.draft ||
+                (!record.draft.deleted && typeof record.draft.content !== 'string')) throw new Error('Invalid draft');
+            entries.push([record.path, {...record.draft, journalID: key}]);
+            persistedDraftEntries.set(key, localStorage.getItem(key));
+        } catch { localDraftStorageFailed = true; }
+    }
+    for (let [path, draft] of entries) {
+        const previous = drafts[path];
+        if (previous && (previous.content !== draft.content || previous.deleted !== draft.deleted || previous.editorTitle !== draft.editorTitle)) {
+            // Conflicting unsent work from separate tabs is never discarded.
+            // A deletion is cancelled when another tab has an unsaved edit.
+            if (draft.deleted) continue;
+            if (!previous.deleted) {
+                path = '/Conflicts/Recovered ' + localMirrorID + '-' + Object.keys(drafts).length + ' ' + toFilename(path);
+                draft = {...draft, version: ''};
+            }
+        }
+        drafts[path] = draft;
+    }
+    return drafts;
+}
 const LOCAL_DIRECTORY_KEY = 'notes-directories-v3:' + API_URL;
 let localDirectoryChanges = JSON.parse(localStorage.getItem(LOCAL_DIRECTORY_KEY) || '{}');
 let localNotesInitialized = false;
@@ -25,13 +80,46 @@ async function matchesLocalBaseline(path, content, baseline = getServerFile(path
 }
 
 function persistLocalDrafts() {
-    localStorage.setItem(LOCAL_DRAFT_KEY, JSON.stringify(localDrafts));
+    const retained = new Set();
+    const wasStorageFailure = localDraftStorageFailed;
+    try {
+        // Write all replacements before removing any older recovery records.
+        for (const [path, draft] of Object.entries(localDrafts)) {
+            draft.journalID ||= LOCAL_JOURNAL_PREFIX + localMirrorID + ':' + Math.random().toString(36).slice(2);
+            let value = JSON.stringify({path, draft});
+            const previous = persistedDraftEntries.get(draft.journalID);
+            if (previous !== undefined && previous !== value) {
+                // Recovery may have adopted an active tab's record. Any edit,
+                // conflict remapping, or acknowledged-version update writes a
+                // new key; retirement below uses the original value as a CAS.
+                draft.journalID = LOCAL_JOURNAL_PREFIX + localMirrorID + ':' + Math.random().toString(36).slice(2);
+                value = JSON.stringify({path, draft});
+            }
+            if (previous !== value) localStorage.setItem(draft.journalID, value);
+            persistedDraftEntries.set(draft.journalID, value);
+            retained.add(draft.journalID);
+        }
+        for (const [key, value] of persistedDraftEntries) {
+            if (retained.has(key)) continue;
+            if (localStorage.getItem(key) === value) localStorage.removeItem(key);
+            persistedDraftEntries.delete(key);
+        }
+        if (!malformedLegacyDrafts) localStorage.removeItem(LOCAL_DRAFT_KEY);
+        localDraftStorageFailed = false;
+        if (wasStorageFailure && !localSyncFailed) localSyncNotice('');
+    } catch (error) {
+        localDraftStorageFailed = true;
+        localSyncNotice('Browser storage is full or unavailable. Keep this tab open until your edits are synced, or copy them somewhere safe.');
+        renderSyncStatus('error');
+        throw error;
+    }
 }
 
-function stageLocalDraft(path, content, version) {
+function stageLocalDraft(path, content, version, editorTitle = localDrafts[path]?.editorTitle) {
     if (!window.FILES_MD_LOCAL_SERVER || !isNotePath(path)) return;
     localDrafts[path] = {
         content,
+        ...(editorTitle && editorTitle !== toHeader(toFilename(path)) ? {editorTitle} : {}),
         version: localDrafts[path]?.version ?? version ?? getServerFile(path)?.version ?? (getServerFile(path) ? 'unknown' : ''),
     };
     persistLocalDrafts();
@@ -63,8 +151,9 @@ function localSyncNotice(message) {
 
 function noteEditorContent(cm) {
     const value = cm.getValue();
-    const prefix = toHeader(toFilename(cm.path)) + '\n';
-    return value.startsWith(prefix) ? value.slice(prefix.length) : value;
+    // The editable title is metadata, including while a rename is pending.
+    const newline = value.indexOf('\n');
+    return value.startsWith('# ') ? (newline < 0 ? '' : value.slice(newline + 1)) : value;
 }
 
 function editorsForNote(path) {
@@ -121,7 +210,7 @@ async function syncLocalNotes(forcePath) {
             if (state.status === 'new' || state.status === 'modified') modified.push(state);
         }
         for (const note of modified) {
-            if (isNotePath(note.path)) stageLocalDraft(note.path, note.content);
+            if (isNotePath(note.path) && !localDrafts[note.path]) stageLocalDraft(note.path, note.content);
         }
         for (const [path, version] of pendingFileDeletes) stageLocalDelete(path, version);
         const directoryChanges = Object.entries(localDirectoryChanges);
@@ -151,7 +240,25 @@ async function syncLocalNotes(forcePath) {
             const path = '/' + sent.path;
             const copy = conflicts[sent.path];
             const saved = copy ? snapshot.files[copy] : snapshot.files[sent.path];
-            if (saved?.content === sent.content && localDrafts[path]?.content === sent.content) {
+            if (saved?.content === sent.content && !copy && localDrafts[path] && !localDrafts[path].deleted) {
+                // A newer keystroke made during this request is based on the
+                // version we just saved, not the older request baseline.
+                localDrafts[path].version = saved.version;
+                let baseline = getServerFile(path);
+                if (!baseline) {
+                    setServerFile(path, sent.content, saved.lastModified);
+                    baseline = getServerFile(path);
+                    baseline.version = sent.version;
+                }
+                if (baseline.version === sent.version) {
+                    baseline.version = saved.version;
+                    localBaselineContents.set(path, {content: sent.content, version: saved.version});
+                }
+                for (const cm of editorsForNote(path)) {
+                    if (String(cm.noteVersion || '') === sent.version) cm.noteVersion = saved.version;
+                }
+            }
+            if (saved?.content === sent.content && !localDrafts[path]?.editorTitle && !localDrafts[path]?.deleted && localDrafts[path]?.content === sent.content) {
                 delete localDrafts[path];
                 resolved.set(path, sent.content);
             }
@@ -163,7 +270,13 @@ async function syncLocalNotes(forcePath) {
             if (String(pendingFileDeletes.get(path) || '') === sent.version) {
                 pendingFileDeletes.delete(path);
                 pendingFileMoves.delete(path);
-                delete localDrafts[path];
+                if (localDrafts[path]?.deleted && String(localDrafts[path].version || '') === sent.version) {
+                    delete localDrafts[path];
+                } else if (localDrafts[path] && !snapshot.files[sent.path]) {
+                    // The user recreated the note while its deletion request
+                    // was in flight. Save that new draft against absence.
+                    localDrafts[path].version = '';
+                }
             }
         }
         persistLocalDrafts();
@@ -177,7 +290,8 @@ async function syncLocalNotes(forcePath) {
         localNotesInitialized = true;
         saveServerFiles();
         lastSyncOkAt = Date.now();
-        renderSyncStatus(Object.keys(localDrafts).length || Object.keys(localDirectoryChanges).length ? 'edits' : 'ok');
+        renderSyncStatus(Object.keys(localDrafts).length || Object.keys(localDirectoryChanges).length ||
+            [window.editor, window.editor2].some(cm => cm?.path && cm.path !== CHAT_PATH && !cm.isClean()) ? 'edits' : 'ok');
         if (localSyncFailed) localSyncNotice('');
         localSyncFailed = false;
         if (Object.keys(conflicts).length) {
@@ -189,7 +303,7 @@ async function syncLocalNotes(forcePath) {
         }
     } catch (error) {
         localSyncFailed = true;
-        localSyncNotice('Sync is unavailable. Pending edits are kept in this browser; reconnect to save them to your notes folder.');
+        if (!localDraftStorageFailed) localSyncNotice('Sync is unavailable. Pending edits are kept in this browser; reconnect to save them to your notes folder.');
         renderSyncStatus('error');
         logError('Local notes sync:', error.message);
         throw error;
@@ -281,6 +395,7 @@ async function applyNotesSnapshot(snapshot, resolved) {
 
 function startLocalNotesSync() {
     if (!window.FILES_MD_LOCAL_SERVER || localSyncTimer) return;
+    watchLocalNotes().catch(() => {});
     localSyncTimer = setInterval(() => {
         if (document.visibilityState === 'visible' && !isSyncingFiles) {
             syncLocalNotes().catch(() => {});
@@ -288,10 +403,49 @@ function startLocalNotesSync() {
     }, 2000);
 }
 
-window.addEventListener('beforeunload', () => {
-    clearInterval(localSyncTimer);
+let localWatchController;
+let localWatchConnected = false;
+async function watchLocalNotes() {
+    while (true) {
+        localWatchController = new AbortController();
+        try {
+            const response = await fetch(`${API_URL}/notes/events`, {
+                credentials: 'include', headers: {'X-FilesMD-Sync': '3'},
+                cache: 'no-store', signal: localWatchController.signal,
+            });
+            if (!response.ok || !response.body) throw new Error('Watcher unavailable');
+            localWatchConnected = true;
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let pending = '';
+            try {
+                while (true) {
+                    const {value, done} = await reader.read();
+                    if (done) break;
+                    pending = (pending + decoder.decode(value, {stream: true})).replace(/\r\n/g, '\n');
+                    let end;
+                    while ((end = pending.indexOf('\n\n')) !== -1) {
+                        const event = pending.slice(0, end);
+                        pending = pending.slice(end + 2);
+                        if (/^event: ?change$/m.test(event) && !isSyncingFiles) syncLocalNotes().catch(() => {});
+                    }
+                }
+            } finally { reader.releaseLock(); }
+        } catch { /* polling remains available during reconnect */ }
+        finally { localWatchConnected = false; }
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+}
+
+window.addEventListener('beforeunload', event => {
     if (!window.FILES_MD_LOCAL_SERVER) return;
     for (const cm of [window.editor, window.editor2]) {
-        if (cm?.path && cm.path !== CHAT_PATH && !cm.isClean()) stageLocalDraft(cm.path, noteEditorContent(cm), cm.noteVersion);
+        if (cm?.path && cm.path !== CHAT_PATH && !cm.isClean()) {
+            try { stageLocalDraft(cm.path, noteEditorContent(cm), cm.noteVersion, cm.getLine(0)); } catch {}
+        }
+    }
+    if (localDraftStorageFailed) {
+        event.preventDefault();
+        event.returnValue = '';
     }
 });

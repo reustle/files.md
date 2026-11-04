@@ -14,7 +14,7 @@ module.exports = defineConfig({
 
     use: {
         // baseURL: `file://${path.resolve('../web/index.html')}`,
-        baseUrl: 'http://app.localhost:3000',
+        baseURL: 'http://localhost:3000',
         trace: 'on-first-retry',
         screenshot: 'only-on-failure',
         video: 'retain-on-failure',
@@ -28,7 +28,7 @@ module.exports = defineConfig({
     },
 
     webServer: {
-        command: 'npx http-server ../web -p 3000',
+        command: 'npx http-server ../web -a 0.0.0.0 -p 3000',
         port: 3000,
         reuseExistingServer: !process.env.CI,
     },

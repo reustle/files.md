@@ -1,6 +1,7 @@
 package fs
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -11,6 +12,57 @@ import (
 
 	"github.com/spf13/afero"
 )
+
+// Syncing the file is not enough: the directory entry created by rename/remove
+// must reach disk before a save can be acknowledged.
+func syncDirectory(backend afero.Fs, name string) error {
+	dir, err := backend.Open(name)
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	closeErr := dir.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
+}
+
+func durableMkdirAll(name string, perm os.FileMode) error {
+	info, err := os.Lstat(name)
+	if err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("not a real directory: %s", name)
+		}
+		if parent := filepath.Dir(name); parent != name {
+			if err := durableMkdirAll(parent, perm); err != nil {
+				return err
+			}
+			// This can be a retry after mkdir succeeded but syncing its parent
+			// failed, so an existing entry still needs a durability barrier.
+			return syncDirectory(afero.NewOsFs(), parent)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	parent := filepath.Dir(name)
+	if err := durableMkdirAll(parent, perm); err != nil {
+		return err
+	}
+	if err := os.Mkdir(name, perm); err != nil && !os.IsExist(err) {
+		return err
+	}
+	info, err = os.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("not a real directory: %s", name)
+	}
+	return syncDirectory(afero.NewOsFs(), parent)
+}
 
 // VersionedOSFS preserves each distinct previous file content outside the notes
 // folder before an overwrite, rename, or deletion. A failed backup blocks changes.
@@ -57,12 +109,27 @@ func (v *VersionedOSFS) preserve(name string) error {
 	}
 	hash := sha256.Sum256(data)
 	dir := filepath.Join(v.BackupDir, rel)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := durableMkdirAll(dir, 0700); err != nil {
 		return err
 	}
 	dest := filepath.Join(dir, hex.EncodeToString(hash[:]))
-	if _, err := os.Stat(dest); err == nil {
-		return nil
+	if info, err := os.Lstat(dest); err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("backup is not a regular file: %s", dest)
+		}
+		if info.Size() != int64(len(data)) {
+			return fmt.Errorf("backup content is damaged: %s", dest)
+		}
+		previous, err := os.ReadFile(dest)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(previous, data) {
+			return fmt.Errorf("backup content is damaged: %s", dest)
+		}
+		return syncDirectory(afero.NewOsFs(), dir)
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	tmp, err := os.CreateTemp(dir, ".backup-")
 	if err != nil {
@@ -83,7 +150,14 @@ func (v *VersionedOSFS) preserve(name string) error {
 	if err := os.Chtimes(tmp.Name(), info.ModTime(), info.ModTime()); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), dest)
+	if err := os.Rename(tmp.Name(), dest); err != nil {
+		return err
+	}
+	return syncDirectory(afero.NewOsFs(), dir)
+}
+
+func (v *VersionedOSFS) MkdirAll(name string, perm os.FileMode) error {
+	return durableMkdirAll(name, perm)
 }
 
 func (v *VersionedOSFS) OpenFile(name string, flag int, perm os.FileMode) (afero.File, error) {
@@ -106,7 +180,10 @@ func (v *VersionedOSFS) Remove(name string) error {
 	if err := v.preserve(name); err != nil {
 		return err
 	}
-	return v.Fs.Remove(name)
+	if err := v.Fs.Remove(name); err != nil {
+		return err
+	}
+	return syncDirectory(v.Fs, filepath.Dir(name))
 }
 
 func (v *VersionedOSFS) RemoveAll(name string) error {
@@ -122,11 +199,23 @@ func (v *VersionedOSFS) Rename(oldname, newname string) error {
 	if err := v.preserve(newname); err != nil {
 		return err
 	}
-	return v.Fs.Rename(oldname, newname)
+	if err := v.Fs.Rename(oldname, newname); err != nil {
+		return err
+	}
+	if err := syncDirectory(v.Fs, filepath.Dir(newname)); err != nil {
+		return err
+	}
+	if filepath.Dir(oldname) != filepath.Dir(newname) {
+		return syncDirectory(v.Fs, filepath.Dir(oldname))
+	}
+	return nil
 }
 
 // Rmdir cannot remove a file or a nonempty directory, even if an external
 // process changed the entry after the caller validated its path.
 func (v *VersionedOSFS) RemoveEmptyDirectory(name string) error {
-	return syscall.Rmdir(name)
+	if err := syscall.Rmdir(name); err != nil {
+		return err
+	}
+	return syncDirectory(v.Fs, filepath.Dir(name))
 }
