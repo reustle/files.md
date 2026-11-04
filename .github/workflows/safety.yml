@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   go:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
@@ -21,7 +21,8 @@ jobs:
       - run: go test -race ./...
 
   browser:
-    runs-on: ubuntu-latest
+    # Match the OS supported by the locked Playwright browser builds.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
