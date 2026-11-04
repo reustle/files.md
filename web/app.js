@@ -17,8 +17,30 @@ function updateWorkspaceLabel(name) {
     label.title = text;
 }
 
+function refreshWorkspaceControls() {
+    const writable = canModifyWorkspace();
+    for (const id of ['new-file', 'new-folder', 'create-first-note']) {
+        const button = document.getElementById(id);
+        if (button) button.disabled = !writable;
+    }
+    for (const cm of [window.editor, window.editor2]) {
+        if (cm) cm.setOption('readOnly', !writable || !cm.path);
+    }
+    const message = document.getElementById('notes-empty-message');
+    if (message) message.textContent = writable
+        ? 'Choose a note from the sidebar, or create your first note.'
+        : 'Connect to a folder on disk before creating or editing notes.';
+}
+
+function allowWorkspaceAction() {
+    if (canModifyWorkspace()) return true;
+    showToast('Connect to a folder on disk before creating or editing notes');
+    return false;
+}
+
 async function init() {
-    updateWorkspaceLabel(window.FILES_MD_LOCAL_SERVER ? 'Notes' : 'Browser notes');
+    setWorkspaceConnection(null);
+    updateWorkspaceLabel('No folder connected');
     // Ask the browser to mark our origin as persistent so the quota
     // manager can't evict the auth cookie + localStorage under disk
     // pressure. Chrome auto-grants for installed PWAs / high-engagement
@@ -82,11 +104,11 @@ async function init() {
                 notice.hidden = true;
             } else {
                 localStorage.removeItem(LAST_SERVER_OK_KEY);
-                notice.textContent = 'Sign in to load your notes. Open your sign-in link to connect to your notes folder.';
+                notice.textContent = 'This browser is not connected to your notes folder. Open the server access link to connect. Creating and editing notes is disabled until connected.';
                 notice.hidden = false;
             }
         } catch (error) {
-            notice.textContent = 'Cannot connect to your notes server. Reload when the connection is available.';
+            notice.textContent = 'Cannot connect to your notes folder. Cached notes are read-only until the connection is verified.';
             notice.hidden = false;
             logError('Session check failed:', error.message);
         }
@@ -97,7 +119,6 @@ async function init() {
     document.getElementById('open-folder-btn').style.display =
         typeof window.showDirectoryPicker === 'function' ? 'inline-flex' : 'none';
     isMemFS = !hasSavedLocalDir;
-    const fallbackWorkspaceLabel = document.getElementById('workspace-path').textContent;
     if (hasSavedLocalDir) updateWorkspaceLabel(savedDirHandle.name);
 
     // Let's create local-first like experience by preloading images.
@@ -105,24 +126,24 @@ async function init() {
         prefetchWelcomeImages();
     }
 
-    // Alert if there's no "Allow on every visit" check.
-    if (isChrome() && hasSavedLocalDir) {
-        const permission = await (await getRootDirHandle()).queryPermission({ mode: 'readwrite' });
-        log('PERMISSION', permission);
-        if (permission !== 'granted') {
-            document.getElementById('open-folder-btn').style.display = 'inline-flex';
-            // TODO maybe ask user to check "Allow on every visit" on left part of the sidebar
-            await removeSavedRootDirHandle();
-            isMemFS = true;
-            updateWorkspaceLabel(fallbackWorkspaceLabel);
-            alert('Can\'t access folder.\n\nPlease, reopen the folder again and check "Allow on every visit" checkbox');
-        }
-    }
-
-    let rootDirHandle = await getRootDirHandle();
-
     let perf = performance.now();
-    files = await loadLocalFiles(rootDirHandle);
+    try {
+        if (hasSavedLocalDir && typeof savedDirHandle.queryPermission === 'function' &&
+            await savedDirHandle.queryPermission({mode: 'readwrite'}) !== 'granted') {
+            throw new Error('Folder permission needs to be granted again');
+        }
+        files = await loadLocalFiles(await getRootDirHandle());
+        if (hasSavedLocalDir) {
+            setWorkspaceConnection('local');
+            document.getElementById('connection-notice').hidden = true;
+        }
+    } catch (error) {
+        files = {};
+        const notice = document.getElementById('connection-notice');
+        notice.textContent = 'Cannot access the selected folder. Reopen it with the folder button to restore access. Editing is disabled.';
+        notice.hidden = false;
+        logError('Workspace unavailable:', error.message);
+    }
     log(`Files loaded in ${performance.now() - perf}ms`);
 
     perf = performance.now();
@@ -156,7 +177,9 @@ async function openNotesHome({saveCurrent = true} = {}) {
         if (isFile && /\.md$/i.test(path)) paths.push(path);
     });
     paths.sort((a, b) => a.localeCompare(b));
-    const remembered = history.state?.path;
+    let remembered;
+    try { remembered = sessionStorage.getItem(workspaceNoteKey()); } catch {}
+    if (!remembered && history.state?.workspaceKey === workspaceNoteKey()) remembered = history.state.path;
     const next = paths.includes(remembered) ? remembered
         : paths.includes('/🪴 Welcome.md') ? '/🪴 Welcome.md' : paths[0];
     if (next) {
@@ -257,6 +280,7 @@ function onLinkPicked(completionText) {
 }
 
 async function newFile(parentDir) {
+    if (!allowWorkspaceAction()) return;
     log('New file clicked');
     // New files always land at the root. The `parentDir` parameter is still
     // honored (sidebar right-click → New file inside a specific folder).
@@ -294,6 +318,7 @@ async function newFile(parentDir) {
 }
 
 async function newFolder() {
+    if (!allowWorkspaceAction()) return;
     let folderName = prompt('Enter folder name:', 'New Folder');
     if (folderName === null) {
         return;
@@ -304,6 +329,7 @@ async function newFolder() {
         alert('Folder name cannot be empty');
         return;
     }
+    if (!allowWorkspaceAction()) return;
 
     let finalFolderName = folderName;
     let num = 1;
@@ -351,7 +377,16 @@ async function openDir() {
         }
         return;
     }
-    // TODO check that permissions are given?
+    try {
+        if (typeof dirHandle.queryPermission === 'function' &&
+            await dirHandle.queryPermission({mode: 'readwrite'}) !== 'granted') {
+            showToast('Read and write access is required to connect this folder');
+            return;
+        }
+    } catch (error) {
+        showToast('Could not verify access to the selected folder');
+        return;
+    }
 
     // Flush the old workspace before changing its directory handle. Otherwise
     // opening the first note in the new folder could save the old buffer there.
@@ -368,48 +403,40 @@ async function openDir() {
     }
     currentEditor = previousEditor;
 
-    // Don't race the existing files loading.
-    while (isLoadingLocalFiles) {
-        await new Promise(r => setTimeout(r, 50));
+    while (isLoadingLocalFiles || isSyncingFiles || isMessingWithCurrentEditor || isSaving) {
+        await new Promise(resolve => setTimeout(resolve, 25));
     }
-    isLoadingLocalFiles = true
-
-    // Don't race with files sync.
-    while (isSyncingFiles) {
-        await new Promise(r => setTimeout(r, 50));
-    }
-    isSyncingFiles = true
-
-    // A new folder needs a fresh server download. Pending actions belong to
-    // the previous folder and must not be carried into this one.
-    server = {files: {}, media: {}, timestamps: {}, mediaTimestamp: 0};
-    localStorage.removeItem(SERVER_STORAGE_KEY);
-    pendingFileDeletes.clear();
-    pendingFileMoves.clear();
-
-    await saveDirectoryHandle(dirHandle);
-    for (const cm of [window.editor, window.editor2]) {
-        if (!cm) continue;
-        cm.path = undefined;
-        cm.noteVersion = undefined;
-    }
-
-    // Copy user-created files from the temporary FS into the opened folder.
+    isSyncingFiles = true;
+    const previousConnection = getWorkspaceConnection();
+    setWorkspaceConnection(null);
     try {
-        await moveUserFiles(dirHandle);
-    } catch (e) {
-        logError("Can't move user files from temporary storage:", e);
-    }
-
-    isLoadingLocalFiles = false
-    try {
-        files = await loadLocalFiles(dirHandle);
+        // Opening a folder never copies another workspace's notes into it.
+        // Read it successfully before committing this tab's new selection.
+        const selectedFiles = await loadLocalFiles(dirHandle);
+        await saveDirectoryHandle(dirHandle);
+        localWatchController?.abort();
+        clearInterval(localSyncTimer);
+        localSyncTimer = null;
+        for (const cm of [window.editor, window.editor2]) {
+            if (!cm) continue;
+            cm.path = undefined;
+            cm.noteVersion = undefined;
+        }
+        files = selectedFiles;
+        pendingFileDeletes.clear();
+        pendingFileMoves.clear();
+        setWorkspaceConnection('local');
+    } catch (error) {
+        setWorkspaceConnection(previousConnection);
+        showToast('Could not open the selected folder: ' + error.message);
+        return;
     } finally {
         isSyncingFiles = false;
     }
 
     isMemFS = false;
     updateWorkspaceLabel(dirHandle.name);
+    document.getElementById('connection-notice').hidden = true;
     renderSidebar();
     await openNotesHome({saveCurrent: false});
 }
@@ -496,35 +523,89 @@ function initDB() {
     });
 }
 
-async function saveDirectoryHandle(directoryHandle) {
+// Folder choices belong to a tab. Immutable handle records let duplicated and
+// restored tabs keep their original folder even when another tab changes its own.
+const TAB_DIRECTORY_KEY = 'files-directory-selection:' + API_URL;
+let selectedDirectoryHandle;
+let selectedDirectoryID = null;
+let selectedDirectoryLoad;
+
+function hasSelectedDiskFolder() { return !!selectedDirectoryHandle; }
+function selectedDiskWorkspaceID() { return selectedDirectoryID; }
+
+async function handleStoreRequest(mode, action) {
     const db = await initDB();
-    const transaction = db.transaction('handles', 'readwrite');
-    const store = transaction.objectStore('handles');
-    await store.put(directoryHandle, 'savedDirectoryHandle');
+    try {
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction('handles', mode);
+            const request = action(tx.objectStore('handles'));
+            let result;
+            request.onsuccess = () => { result = request.result; };
+            request.onerror = () => reject(request.error);
+            tx.oncomplete = () => resolve(result);
+            tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
+            tx.onerror = () => reject(tx.error || new Error('Transaction failed'));
+        });
+    } finally { db.close(); }
+}
+
+async function saveDirectoryHandle(directoryHandle) {
+    let id;
+    const keys = await handleStoreRequest('readonly', store => store.getAllKeys());
+    for (const key of keys) {
+        if (typeof key !== 'string' || !key.startsWith('directory:')) continue;
+        const saved = await handleStoreRequest('readonly', store => store.get(key));
+        try {
+            if (saved && await directoryHandle.isSameEntry(saved)) { id = key; break; }
+        } catch { /* An inaccessible old folder must not prevent opening another. */ }
+    }
+    id ||= 'directory:' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    await handleStoreRequest('readwrite', store => {
+        store.put(directoryHandle, id);
+        return store.put(id, 'defaultDirectorySelection');
+    });
+    // Update this tab only after the transaction has durably committed.
+    sessionStorage.setItem(TAB_DIRECTORY_KEY, id);
+    selectedDirectoryID = id;
+    selectedDirectoryHandle = directoryHandle;
+    selectedDirectoryLoad = null;
 }
 
 async function getSavedRootDirHandle() {
-    const db = await initDB();
-    const tx = db.transaction("handles", "readonly");
-    const store = tx.objectStore("handles");
-
-    return new Promise((resolve, reject) => {
-        const req = store.get("savedDirectoryHandle");
-        req.onsuccess = () => resolve(req.result ?? null);
-        req.onerror = () => reject(req.error);
-        tx.onabort = () => reject(tx.error || new Error("Transaction aborted"));
-    });
+    if (selectedDirectoryHandle !== undefined) return selectedDirectoryHandle;
+    if (selectedDirectoryLoad) return selectedDirectoryLoad;
+    selectedDirectoryLoad = (async () => {
+        let id = sessionStorage.getItem(TAB_DIRECTORY_KEY);
+        if (id === null) {
+            id = await handleStoreRequest('readonly', store => store.get('defaultDirectorySelection'));
+            // Migrate the old global handle without deleting it. New selections
+            // never mutate it, so an existing tab cannot be redirected later.
+            if (!id) {
+                const legacy = await handleStoreRequest('readonly', store => store.get('savedDirectoryHandle'));
+                if (legacy) {
+                    await saveDirectoryHandle(legacy);
+                    return selectedDirectoryHandle;
+                }
+            }
+            // Pin server/no-folder tabs too. Otherwise every save could adopt a
+            // different tab's newly chosen default folder.
+            sessionStorage.setItem(TAB_DIRECTORY_KEY, id || 'server');
+        }
+        selectedDirectoryID = id && id !== 'server' ? id : null;
+        selectedDirectoryHandle = selectedDirectoryID
+            ? await handleStoreRequest('readonly', store => store.get(selectedDirectoryID)) || null : null;
+        return selectedDirectoryHandle;
+    })();
+    try { return await selectedDirectoryLoad; }
+    finally { selectedDirectoryLoad = null; }
 }
 
 async function removeSavedRootDirHandle() {
-    const db = await initDB();
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction('handles', 'readwrite');
-        const store = transaction.objectStore('handles');
-        const request = store.delete('savedDirectoryHandle');
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject(request.error);
-    });
+    // Forget access for this tab; retain other tabs' handles and all note data.
+    sessionStorage.setItem(TAB_DIRECTORY_KEY, 'server');
+    selectedDirectoryHandle = null;
+    selectedDirectoryID = null;
+    selectedDirectoryLoad = null;
 }
 
 async function getRootDirHandle() {
@@ -863,6 +944,7 @@ window.addEventListener('keydown', async (event) => {
 document.addEventListener('keydown', (event) => {
     if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key === 's') {
         event.preventDefault();
+        if (!allowWorkspaceAction()) return;
         const keystroke = navigator.platform.toLowerCase().includes('mac') ? '⌘S' : 'Ctrl+S';
         showToast(`It is autosaved, no need to press ${keystroke} :)`);
     }

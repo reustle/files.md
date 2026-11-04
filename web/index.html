@@ -50,6 +50,7 @@
     <script src="server-config.js?v="></script>
     <script src="files.js?v="></script>
     <script src="local-sync.js?v="></script>
+    <script src="native-drafts.js?v="></script>
     <!-- mermaid.min.js is lazy-loaded on first ```mermaid encounter -->
 </head>
 <body>
@@ -64,13 +65,13 @@
         <button id="close-sidebar" data-tooltip="Close sidebar (⌘~)" aria-label="Close sidebar (⌘~)" onclick="toggleSidebar()">×</button>
     </div>
     <div id="toolbar">
-        <button id="new-file" data-tooltip="New File (⌘N)" aria-label="New File (⌘N)" onclick="newFile()">
+        <button id="new-file" disabled data-tooltip="New File (⌘N)" aria-label="New File (⌘N)" onclick="newFile()">
             <svg width="22" height="22" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" fill="none" stroke="currentColor" stroke-width="10" stroke-linejoin="round" transform="matrix(1, 0, 0, -1, 0, 0)">
                 <path d="M208,36H48A12.01375,12.01375,0,0,0,36,48V208a12.01375,12.01375,0,0,0,12,12H156.68652a11.92174,11.92174,0,0,0,8.48536-3.51465l51.31347-51.31347A11.92174,11.92174,0,0,0,220,156.68652V48A12.01375,12.01375,0,0,0,208,36ZM164,206.34277V163.99219h42.35107Zm48-50.35058H160a3.99988,3.99988,0,0,0-4,4V212H48a4.00458,4.00458,0,0,1-4-4V48a4.00458,4.00458,0,0,1,4-4H208a4.00458,4.00458,0,0,1,4,4Z"></path>
                 <path d="M120 88v64M88 120h64" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linecap="round"/>
             </svg>
         </button>
-        <button id="new-folder" data-tooltip="New Folder (⌘⇧N)" aria-label="New Folder (⌘⇧N)" onclick="newFolder()">
+        <button id="new-folder" disabled data-tooltip="New Folder (⌘⇧N)" aria-label="New Folder (⌘⇧N)" onclick="newFolder()">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" viewBox="0 0 32 32">
                 <path stroke-linecap="round" stroke-width="2" d="M28 11v13a2 2 0 01-2 2H6a2 2 0 01-2-2V8a2 2 0 012-2h6c3 0 3 3 5 3h9.003C27.108 9 28 9.895 28 11z"/>
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 21v-8M12 17h8"/>
@@ -112,8 +113,8 @@
     </div>
     <div id="notes-empty" hidden>
         <h1>Your notes</h1>
-        <p>Choose a note from the sidebar, or create your first note.</p>
-        <button type="button" onclick="newFile()">Create note</button>
+        <p id="notes-empty-message">Connect to a folder on disk before creating or editing notes.</p>
+        <button id="create-first-note" type="button" disabled onclick="newFile()">Create note</button>
     </div>
 </div>
 

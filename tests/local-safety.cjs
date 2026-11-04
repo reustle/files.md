@@ -11,6 +11,7 @@ const {promisify} = require('node:util');
 const assert = require('node:assert/strict');
 const verifyArchiveSafety = require('./archive-safety.cjs');
 const {verifyNotesOnlyUI, verifyFormerInbox, verifyInvalidatedSave} = require('./notes-only.cjs');
+const {verifyLockedWorkspace, verifyUnavailableFolder, verifyProjectTabs, verifySharedAuthorization, verifyManyBackgroundTabs, verifyNativeFolderTabs} = require('./connection-safety.cjs');
 
 const repo = path.resolve(__dirname, '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -189,6 +190,8 @@ async function verifyLiveChanges(page, notes) {
     await page.reload();
     await page.waitForFunction(() => getMemFile('/Offline.md') && !isSyncingFiles);
     assert.equal(await page.evaluate(() => read('/Offline.md')), 'Draft saved while disconnected');
+    assert.equal(await page.evaluate(() => canModifyWorkspace()), false, 'Offline reload must stay read-only until the disk connection is verified');
+    assert.equal(await page.locator('#new-file').isDisabled(), true);
     await context.unroute('**/notes/sync');
     await page.waitForFunction(() => server.initialized && !isSyncingFiles && !localDrafts['/Offline.md']);
     assert.equal(await fs.readFile(path.join(notes, 'Offline.md'), 'utf8'), 'Draft saved while disconnected');
@@ -503,7 +506,10 @@ async function verifyDurableConcurrentDrafts(page, notes) {
     assert.ok(recovered.includes('Second tab unsaved keystrokes'));
     await context.unroute('**/notes/sync');
     await context.unroute('**/notes/events');
-    await page.evaluate(() => syncLocalNotes());
+    await page.evaluate(async () => {
+        await syncLocalNotes(); // Verify the disk connection before replaying drafts.
+        await syncLocalNotes();
+    });
     const saved = Object.values(await snapshot(notes));
     assert.ok(saved.includes('First tab unsaved keystrokes'));
     assert.ok(saved.includes('Second tab unsaved keystrokes'));
@@ -614,7 +620,11 @@ async function runCase(binary, browserType, volatile, empty) {
         await page.goto(url);
         await page.waitForFunction(() =>
             !document.getElementById('connection-notice').hidden);
-        assert.match(await page.locator('#connection-notice').innerText(), /Sign in/);
+        assert.match(await page.locator('#connection-notice').innerText(), /connect/i);
+        await verifyLockedWorkspace(page);
+        await page.evaluate(() => localStorage.setItem(LAST_SERVER_OK_KEY, String(Date.now())));
+        await page.reload();
+        await verifyLockedWorkspace(page);
         await assertNoSamples(page);
         assert.deepEqual(await snapshot(notes), baseline);
         await page.goto((await fs.readFile(path.join(root, 'login-url'), 'utf8')).trim());
@@ -773,6 +783,7 @@ async function runCase(binary, browserType, volatile, empty) {
                 verifyExactContents, verifyFocusDuringRename, verifyTitleRecoveryAndSplitPane,
                 verifyInflightEdits, verifyPushEvents, verifyStorageFailure,
                 verifyDurableConcurrentDrafts, verifyArchiveSafety, verifyFormerInbox, verifyInvalidatedSave,
+                verifyUnavailableFolder, verifyProjectTabs, verifySharedAuthorization, verifyManyBackgroundTabs,
             ];
             for (const check of checks) {
                 await phase(check.name);
@@ -781,7 +792,10 @@ async function runCase(binary, browserType, volatile, empty) {
         }
         if (browserType === chromium && !volatile && !empty) {
             await phase('verifyFolderPicker');
+            const beforeLocalFolders = await snapshot(notes);
             await verifyFolderPicker(page);
+            await verifyNativeFolderTabs(page);
+            assert.deepEqual(await snapshot(notes), beforeLocalFolders, 'Selected local folders must never sync into the server workspace');
         }
         assert.deepEqual(errors, []);
         passed = true;

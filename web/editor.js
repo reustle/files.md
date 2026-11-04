@@ -20,6 +20,7 @@ function initEditor(el) {
     }
 
     let newEditor = HyperMD.fromTextArea(el, {
+        readOnly: true,
         dragDrop: false,
         viewportMargin: 10,
         mode: {
@@ -66,6 +67,12 @@ function initEditor(el) {
         configureMouse: () => ({addNew: false}) // disable multicursor
     });
     newEditor.setSize(null, '100%');
+    newEditor.on('beforeChange', (cm, change) => {
+        if (!canModifyWorkspace() && change.origin !== 'remote' &&
+            !(isMessingWithCurrentEditor && change.origin === 'setValue')) {
+            change.cancel();
+        }
+    });
     newEditor.on('focus', function() {
         const activate = () => {
             if (!newEditor.hasFocus()) return;
@@ -249,6 +256,11 @@ function initEditor(el) {
     // Programmatic loads (openFile's setValue) are not user edits.
     newEditor.on('change', function (cm, change) {
         if (change.origin === 'remote') return;
+        if (!canModifyWorkspace()) return;
+        if (hasSelectedDiskFolder() && cm.path &&
+            (!isMessingWithCurrentEditor || change.origin !== 'setValue')) {
+            try { stageNativeDraft(cm); } catch {}
+        }
         if (window.FILES_MD_LOCAL_SERVER && cm.path &&
             (!isMessingWithCurrentEditor || change.origin !== 'setValue')) {
             // Persist every edit synchronously: crashes and mobile tab eviction
@@ -272,6 +284,10 @@ function initEditor(el) {
 
     // Image upload
     newEditor.on('paste', async (_, event) => {
+        if (!canModifyWorkspace() || newEditor.getOption('readOnly')) {
+            event.preventDefault();
+            return;
+        }
         const clipboard = event.clipboardData || event.originalEvent.clipboardData;
 
         // Paste a URL onto selected text -> [selection](url).

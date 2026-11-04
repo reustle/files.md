@@ -53,6 +53,7 @@ async function read(path) {
 }
 
 async function write(path, content, {stageDraft = true} = {}) {
+    if (stageDraft) requireWritableWorkspace();
     if (window.FILES_MD_LOCAL_SERVER && stageDraft) stageLocalDraft(path, content);
     let fileHandle = await getFileHandle(path, true);
     const writable = await fileHandle.createWritable();
@@ -61,6 +62,7 @@ async function write(path, content, {stageDraft = true} = {}) {
 }
 
 async function writeAtEnd(path, content) {
+    requireWritableWorkspace();
     let fileHandle = await getFileHandle(path, true);
     if (fileHandle === null) {
         // TODO fix once Chromium fixes the bug
@@ -82,6 +84,7 @@ async function writeAtEnd(path, content) {
 // TODO save metadata & files
 // Write only if content is different.
 async function writeIfContentIsDifferent(path, content, {stageDraft = true} = {}) {
+    if (stageDraft) requireWritableWorkspace();
     if (window.FILES_MD_LOCAL_SERVER && stageDraft) stageLocalDraft(path, content);
     let fileHandle = await getFileHandle(path, true);
     if (fileHandle === null) {
@@ -117,13 +120,17 @@ async function exists(path) {
 }
 
 async function remove(path, {moveTo = null, syncDeletion = true} = {}) {
+    if (syncDeletion) requireWritableWorkspace();
+    const nativeDraftsToRetire = hasSelectedDiskFolder()
+        ? nativeDraftEntries(path).filter(entry => entry.draft.tab === localMirrorID) : [];
     let fileHandle = await getFileHandle(path);
     if (fileHandle === null) {
         // TODO fix once Chromium fixes the bug
         logError('Malformed name, skipping file...');
         return;
     }
-    const baseline = window.FILES_MD_LOCAL_SERVER ? getServerFile(path)?.version : getServerFile(path)?.lastModified;
+    const baseline = window.FILES_MD_LOCAL_SERVER && !hasSelectedDiskFolder()
+        ? localDrafts[path]?.version ?? getServerFile(path)?.version : getServerFile(path)?.lastModified;
     if (typeof fileHandle.remove === 'function') {
         await fileHandle.remove();
     } else {
@@ -134,20 +141,22 @@ async function remove(path, {moveTo = null, syncDeletion = true} = {}) {
         await dir.removeEntry(filename);
     }
     if (syncDeletion && baseline) pendingFileDeletes.set(path, baseline);
-    if (syncDeletion && window.FILES_MD_LOCAL_SERVER) {
+    if (syncDeletion && window.FILES_MD_LOCAL_SERVER && !hasSelectedDiskFolder()) {
         if (baseline) stageLocalDelete(path, baseline);
         else {
             delete localDrafts[path];
             persistLocalDrafts();
         }
     }
-    if (syncDeletion && moveTo) recordFileMove(path, moveTo);
+    if (!moveTo) for (const entry of nativeDraftsToRetire) retireNativeDraft(entry);
+    if (syncDeletion && moveTo && !hasSelectedDiskFolder()) recordFileMove(path, moveTo);
     log(`File ${path} removed successfully.`);
 
     removeMemFile(path);
 }
 
 async function rename(oldpath, newpath) {
+    requireWritableWorkspace();
     let content = await read(oldpath)
     await write(newpath, content)
     await remove(oldpath, {moveTo: newpath})
@@ -156,6 +165,7 @@ async function rename(oldpath, newpath) {
 // Only explicitly enumerated files are removed. A failed file operation or
 // an unsupported file left in the folder must never trigger recursive deletion.
 async function removeDir(dirPath) {
+    requireWritableWorkspace();
     const filePaths = collectFilePathsInDir(dirPath);
     for (const path of filePaths) await remove(path);
     await removeEmptyDirectoryTree(dirPath);
@@ -163,6 +173,7 @@ async function removeDir(dirPath) {
 }
 
 async function removeEmptyDirectoryTree(dirPath) {
+    requireWritableWorkspace();
     const parts = dirPath.split('/').filter(Boolean);
     const name = parts.pop();
     if (!name) throw new Error('Cannot remove the notes root');
@@ -181,6 +192,7 @@ async function removeEmptyDirectoryTree(dirPath) {
 // any parent (including a different one). Per-file moves keep server-sync
 // bookkeeping intact; afterwards the empty old directory entry is removed.
 async function moveDir(oldDirPath, newDirPath) {
+    requireWritableWorkspace();
     if (newDirPath === oldDirPath) return;
     // Disallow moving a folder into itself or any of its own descendants -
     // we'd otherwise loop forever copying the dir into a subpath of itself.
@@ -208,6 +220,7 @@ async function moveDir(oldDirPath, newDirPath) {
 // renameDir moves every file under oldDirPath into a sibling directory called
 // newName.
 async function renameDir(oldDirPath, newName) {
+    requireWritableWorkspace();
     const parts = trimPrefix(oldDirPath, '/').split('/').filter(Boolean);
     parts.pop();
     const parentPath = '/' + parts.join('/');
@@ -241,6 +254,7 @@ function removeMemDir(dirPath) {
 }
 
 async function mkdir(path) {
+    requireWritableWorkspace();
     try {
         let currentDirHandle = await getRootDirHandle();
         await currentDirHandle.getDirectoryHandle(path, {create: true});
@@ -251,6 +265,7 @@ async function mkdir(path) {
 }
 
 async function mkdirAll(path) {
+    requireWritableWorkspace();
     const dirs = path.split('/');
     let currentDirHandle = await getRootDirHandle();
     for (const dirName of dirs) {
@@ -263,6 +278,7 @@ async function mkdirAll(path) {
 // createDir creates an empty directory on OPFS at the given path and registers
 // it in the in-memory file tree so the sidebar picks it up.
 async function createDir(dirPath, {syncDirectory = true} = {}) {
+    if (syncDirectory) requireWritableWorkspace();
     const parts = trimPrefix(dirPath, '/').split('/').filter(Boolean);
     if (parts.length === 0) return;
     if (syncDirectory) stageLocalDirectory(dirPath, 'mkdir');
@@ -282,6 +298,7 @@ async function createDir(dirPath, {syncDirectory = true} = {}) {
 }
 
 async function writeMediaFile(fileName, file) {
+    requireWritableWorkspace();
     try {
         const rootHandle = await getRootDirHandle();
 

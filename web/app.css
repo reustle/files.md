@@ -614,6 +614,12 @@ pre.HyperMD-task-line span.cm-formatting-list-ul.hmd-hidden-token + .cm-formatti
     margin: 0 2px;
 }
 
+#toolbar button:disabled,
+#create-first-note:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
 button svg {
     display: block;
     stroke: var(--col-link);

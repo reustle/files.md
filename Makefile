@@ -36,34 +36,17 @@ lint:
 format:
 	gofumpt -w .
 
-e2e: # make e2e test="create and move"
-	killall server || true
-	go run ./cmd/server > /tmp/server_err 2>&1 & \
-	cd tests && npm run test $(if $(test),-g "$(test)")
+e2e: # maintained standalone-server safety matrix; disposable workspaces only
+	npm --prefix tests test
 
-e2eh: # headed e2e tests
-	killall server || true
-	go run ./cmd/server & \
-	cd tests && npm run test:headed $(if $(test),-g "$(test)")
+legacy-e2e: # historical specs; requires a separately configured disposable legacy server
+	npm --prefix tests run test:legacy -- $(if $(test),-g "$(test)")
 
-e2es: # run single test, e2es test="name"
-	cd tests && npm run test -- $(if $(test),-g "$(test)")
+legacy-e2eh:
+	npm --prefix tests run test:legacy:headed -- $(if $(test),-g "$(test)")
 
-e2esh: # run single test headed, e2esh test="name"
-	cd tests && npm run test:headed -- $(if $(test),-g "$(test)")
-
-perf:
-	cd tests && PERF=1 npm run test -- perf.spec.js
-
-sync:
-	killall server || true
-	go run ./cmd/server & \
-	cd tests && npm run test --g "sync"
-
-synch:
-	killall server || true
-	go run ./cmd/server & \
-	cd tests && npm run test:headed --g "sync"
+legacy-perf:
+	cd tests && PERF=1 npm run test:legacy -- perf.spec.js
 
 report:
 	cd tests && npx playwright show-report

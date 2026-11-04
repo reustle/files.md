@@ -50,6 +50,7 @@ const urlsToCache = [
     '/server-config.js',
     '/files.js',
     '/local-sync.js',
+    '/native-drafts.js',
     '/editor.js',
     '/modals.js',
     '/lib/latex/fold-math.js',

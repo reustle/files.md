@@ -19,6 +19,25 @@ const CURRENT_FILE_SYNC_INTERVAL = 1000; // ms, how often to save currently open
 // by the server when base64 pushes the body past the cap.
 const MAX_MEDIA_SIZE = 65 * 1024 * 1024;
 
+// Editing is enabled only after this page verifies a disk-backed workspace.
+// A cached login timestamp is not proof that a folder is available.
+let workspaceConnection = null;
+function getWorkspaceConnection() { return workspaceConnection; }
+function canModifyWorkspace() { return workspaceConnection !== null; }
+function workspaceNoteKey() {
+    return 'files-last-note:' + API_URL + ':' + (selectedDiskWorkspaceID() || 'server');
+}
+function requireWritableWorkspace() {
+    if (!canModifyWorkspace()) throw new Error('Connect to a folder on disk before changing files.');
+}
+function setWorkspaceConnection(kind) {
+    if (kind !== null && kind !== 'server' && kind !== 'local') throw new Error('Unknown workspace connection');
+    if (kind !== null && workspaceConnection === kind) return;
+    workspaceConnection = kind;
+    window.dispatchEvent(new Event('workspaceconnectionchange'));
+    if (typeof refreshWorkspaceControls === 'function') refreshWorkspaceControls();
+}
+
 let isSaving = false;
 let isSyncingFiles = false;
 let isSyncingMedia = false;
@@ -132,6 +151,10 @@ let mediaIndex = {};
 
 // A new snapshot namespace prevents reuse of unsafe pre-v2 browser metadata.
 const SERVER_STORAGE_KEY = 'server-v2:' + API_URL;
+function snapshotStorage() { return window.FILES_MD_LOCAL_SERVER ? sessionStorage : localStorage; }
+function snapshotStorageKey() {
+    return window.FILES_MD_LOCAL_SERVER ? SERVER_STORAGE_KEY + ':tab:' + localMirrorID : SERVER_STORAGE_KEY;
+}
 const pendingFileDeletes = new Map();
 const pendingFileMoves = new Map();
 const SUPPORTED_EXTENSIONS = ['md', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'mp4', 'webm', 'mov', 'mp3', 'ogg', 'oga', 'weba', 'wav'];
@@ -263,7 +286,8 @@ async function loadLocalFiles(rootDirHandle, slowMode = false) {
     }
 
     // Load server files
-    const savedServerFiles = localStorage.getItem(SERVER_STORAGE_KEY);
+    const savedServerFiles = typeof hasSelectedDiskFolder === 'function' && hasSelectedDiskFolder()
+        ? null : snapshotStorage().getItem(snapshotStorageKey());
     if (savedServerFiles) {
         server = JSON.parse(savedServerFiles);
     }
@@ -527,6 +551,7 @@ async function syncLocalFileWithServer(path) {
 }
 
 async function syncMediaFiles() {
+    if (!canModifyWorkspace() || (typeof hasSelectedDiskFolder === 'function' && hasSelectedDiskFolder())) return;
     // We should have at least one 200 response from service.
     // The first 200 response we get from /token, meaning that
     // our application is linked to the server for sync.
@@ -897,10 +922,16 @@ function getImageExtension(mimeType) {
 
 // TODO can we reuse moveFile?
 async function moveCurrentFile(toDir) {
+    if (!canModifyWorkspace()) { showToast('Connect to a folder on disk before changing files.'); return; }
     const cm = currentEditor;
     const oldPath = cm.path;
     const newPath = joinPath('/', toDir, toFilename(oldPath));
     if (oldPath === newPath) return;
+    if (hasSelectedDiskFolder()) {
+        try { await moveFile(oldPath, newPath); }
+        catch (error) { showToast(error.message || 'Could not move the note'); }
+        return;
+    }
     while (isMessingWithCurrentEditor || isSyncingFiles || isSaving) {
         await new Promise(resolve => setTimeout(resolve, 25));
     }
@@ -968,13 +999,36 @@ function addMemFile(path, memFile) {
     // The directory order should stay as established by loadLocalFiles
 }
 
-async function moveFile(oldPath, newPath, {lockHeld = false} = {}) {
+async function moveFile(oldPath, newPath, {lockHeld = false, nativeLockHeld = false} = {}) {
+    requireWritableWorkspace();
+    if (hasSelectedDiskFolder() && navigator.locks && !nativeLockHeld) {
+        return navigator.locks.request('files-md-native:' + selectedDiskWorkspaceID(),
+            () => moveFile(oldPath, newPath, {lockHeld, nativeLockHeld: true}));
+    }
     if (oldPath === newPath) {
         return;
     }
     if (!lockHeld) {
         while (isMessingWithCurrentEditor || isSyncingFiles || isSaving) {
             await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        if (hasSelectedDiskFolder()) {
+            const targets = [window.editor, window.editor2].filter(cm => cm?.path === oldPath);
+            for (const cm of targets) {
+                if (cm.isClean()) continue;
+                const before = cm.getValue();
+                const previousEditor = currentEditor;
+                try {
+                    currentEditor = cm;
+                    await syncCurrentFile(true, nativeLockHeld);
+                } finally { currentEditor = previousEditor; }
+                if (cm.path !== oldPath || !cm.isClean() || cm.getValue() !== before) {
+                    throw new Error('The note changed while preparing the move. Review it and try again.');
+                }
+            }
+            if (targets.some(cm => cm.path !== oldPath || !cm.isClean())) {
+                throw new Error('Save pending edits before moving the note.');
+            }
         }
         isMessingWithCurrentEditor = true;
     }
@@ -985,9 +1039,17 @@ async function moveFile(oldPath, newPath, {lockHeld = false} = {}) {
         if (await exists(newPath)) throw new Error('Destination already exists: ' + newPath);
         let file = await (await getFileHandle(oldPath)).getFile();
         const dirtyEditor = openEditors.find(cm => !cm.isClean());
-        const pending = window.FILES_MD_LOCAL_SERVER && localDrafts[oldPath];
+        const diskContent = await file.text();
+        if (hasSelectedDiskFolder() && !dirtyEditor) {
+            const recovered = await recoverNativeDraft(oldPath, diskContent);
+            if (recovered && (recovered.content !== diskContent ||
+                (recovered.editorTitle && recovered.editorTitle !== toHeader(toFilename(oldPath))))) {
+                throw new Error('Open and save pending edits before moving this note.');
+            }
+        }
+        const pending = window.FILES_MD_LOCAL_SERVER && !hasSelectedDiskFolder() && localDrafts[oldPath];
         const content = dirtyEditor ? noteEditorContent(dirtyEditor)
-            : pending && !pending.deleted ? pending.content : await file.text();
+            : pending && !pending.deleted ? pending.content : diskContent;
         await writeIfContentIsDifferent(newPath, content);
         if (pending?.editorTitle) stageLocalDraft(newPath, content, undefined, pending.editorTitle);
 
@@ -1014,6 +1076,10 @@ async function moveFile(oldPath, newPath, {lockHeld = false} = {}) {
                     {line: 0, ch: cm.getLine(0).length}, 'remote');
             }
             cm.path = newPath;
+            if (hasSelectedDiskFolder()) {
+                cm.nativeBaselineContent = content;
+                cm.markClean();
+            }
         }
         // delete files[oldDir][oldFilename];
         await renderSidebar();
@@ -1043,6 +1109,7 @@ function recordFileMove(oldPath, newPath) {
 //     path,
 // }
 function getServerFile(path) {
+    if (typeof hasSelectedDiskFolder === 'function' && hasSelectedDiskFolder()) return null;
     let dirs = path.split('/');
     dirs = dirs.filter(d => d !== '');
     const filename = dirs.pop();
@@ -1119,7 +1186,8 @@ function removeServerFile(path) {
 }
 
 function saveServerFiles() {
-    localStorage.setItem(SERVER_STORAGE_KEY, JSON.stringify(server));
+    if (typeof hasSelectedDiskFolder === 'function' && hasSelectedDiskFolder()) return;
+    snapshotStorage().setItem(snapshotStorageKey(), JSON.stringify(server));
 }
 
 async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
@@ -1183,22 +1251,32 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
         let filename = toFilename(path);
         const header = toHeader(filename)
         let content = '';
+        let nativeDiskContent;
+        let nativeDraft;
         if (memFile.handle !== undefined) {
             const file = await memFile.handle.getFile();
             content = await file.text();
-            const draftTitle = window.FILES_MD_LOCAL_SERVER && localDrafts[path]?.editorTitle;
-            content = `${draftTitle || header}\n${content}`;
+            if (hasSelectedDiskFolder()) {
+                nativeDiskContent = content;
+                nativeDraft = await recoverNativeDraft(path, content);
+                content = `${nativeDraft?.editorTitle || header}\n${nativeDraft?.content ?? content}`;
+            } else {
+                const draftTitle = window.FILES_MD_LOCAL_SERVER && localDrafts[path]?.editorTitle;
+                content = `${draftTitle || header}\n${content}`;
+            }
         } else {
             // We use welcome's files
             content = memFile.content;
         }
 
         currentEditor.path = path;
-        currentEditor.noteVersion = getServerFile(path)?.version;
+        currentEditor.noteVersion = hasSelectedDiskFolder() ? undefined
+            : localDrafts[path]?.version ?? getServerFile(path)?.version;
         if (saveToHistory) {
             const state = {
                 path: path,
                 el: el,
+                workspaceKey: workspaceNoteKey(),
             };
             history.pushState(state, '');
         }
@@ -1228,7 +1306,8 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
                 currentEditor.replaceRange(
                     content.substring(prefixEnd, newEnd),
                     currentEditor.posFromIndex(prefixEnd),
-                    currentEditor.posFromIndex(oldEnd)
+                    currentEditor.posFromIndex(oldEnd),
+                    'remote'
                 );
             }
             currentEditor.markClean();
@@ -1252,8 +1331,19 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
         }
 
         const end = performance.now();
-        currentEditor.setOption('readOnly', false);
-        currentEditor.noteVersion = getServerFile(path)?.version;
+        currentEditor.nativeBaselineContent = nativeDiskContent;
+        if (nativeDraft && (nativeDraft.content !== nativeDiskContent ||
+            (nativeDraft.editorTitle && nativeDraft.editorTitle !== header))) {
+            // Establish the disk version as clean, then restore the draft through
+            // CodeMirror's public API so normal saves see the recovered edit.
+            const recovered = currentEditor.getValue();
+            currentEditor.setValue(header + '\n' + nativeDiskContent);
+            currentEditor.markClean();
+            currentEditor.setValue(recovered);
+        }
+        currentEditor.setOption('readOnly', !canModifyWorkspace());
+        currentEditor.noteVersion = hasSelectedDiskFolder() ? undefined
+            : localDrafts[path]?.version ?? getServerFile(path)?.version;
         log(`File ${path} opened in: ${(end - start).toFixed(3)} milliseconds, opId: ${id}`);
 
         // Once we spent enough time in file, set viewportMargin to infinity to prevent artefacts.
@@ -1263,6 +1353,7 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
             currentEditor.setOption('viewportMargin', Infinity);
         }, 200);
 
+        try { sessionStorage.setItem(workspaceNoteKey(), path); } catch {}
         selectSidebarItem(path);
     } catch (err) {
         logError('openFile:', err);
@@ -1279,7 +1370,12 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
 // TODO It should be atomic.
 // If currentEditor is changed during the execution of this function, we'll have RC.
 // So, wherever we change currentEditor reference, we should lock via isMessingWithCurrentEditor.
-async function syncCurrentFile(switchAwayEditor = false) {
+async function syncCurrentFile(switchAwayEditor = false, nativeLockHeld = false) {
+    if (hasSelectedDiskFolder() && navigator.locks && !nativeLockHeld) {
+        return navigator.locks.request('files-md-native:' + selectedDiskWorkspaceID(),
+            () => syncCurrentFile(switchAwayEditor, true));
+    }
+    if (!canModifyWorkspace()) return;
     if (files === undefined || debug || !window.currentEditor || currentEditor.path === undefined) {
         return;
     }
@@ -1303,7 +1399,7 @@ async function syncCurrentFile(switchAwayEditor = false) {
         while (isSyncingFiles) await new Promise(resolve => setTimeout(resolve, 25));
     }
     // TODO replace with queues?
-    if (isMessingWithCurrentEditor || currentEditor !== savingEditor ||
+    if (!canModifyWorkspace() || isMessingWithCurrentEditor || currentEditor !== savingEditor ||
         !savingPath || savingEditor.path !== savingPath) {
         return;
     }
@@ -1312,6 +1408,29 @@ async function syncCurrentFile(switchAwayEditor = false) {
     const path = savingPath;
     let isCurrentEditorSame = () => {
         return path === window.currentEditor.path;
+    }
+
+    if (hasSelectedDiskFolder() && !savingEditor.isClean()) {
+        const priorReadOnly = savingEditor.getOption('readOnly');
+        savingEditor.setOption('readOnly', true);
+        try {
+            stageNativeDraft(savingEditor);
+            const diskContent = await read(path);
+            if (savingEditor.nativeBaselineContent !== undefined && diskContent !== savingEditor.nativeBaselineContent) {
+                await recoverNativeDraft(path, diskContent);
+                savingEditor.setValue(toHeader(toFilename(path)) + '\n' + diskContent);
+                savingEditor.nativeBaselineContent = diskContent;
+                savingEditor.markClean();
+                isMessingWithCurrentEditor = false;
+                return;
+            }
+        } catch (error) {
+            showToast('Could not safely save this note. Your draft is kept: ' + error.message);
+            isMessingWithCurrentEditor = false;
+            return;
+        } finally {
+            savingEditor.setOption('readOnly', priorReadOnly);
+        }
     }
 
     // Track in-editor renaming based on header.
@@ -1406,6 +1525,10 @@ async function syncCurrentFile(switchAwayEditor = false) {
                     handle: newHandle,
                 });
                 await remove(path, {moveTo: newPath});
+                if (hasSelectedDiskFolder()) {
+                    savingEditor.nativeBaselineContent = content;
+                    acknowledgeNativeDraft(path, content, savingEditor.getLine(0));
+                }
                 log('Created', newPath);
 
                 await renderSidebar();
@@ -1472,6 +1595,7 @@ async function syncCurrentFile(switchAwayEditor = false) {
             const file = getMemFile(path);
             if (file && file.handle) {
                 const freshContent = getSavingContent();
+                const savedTitle = savingEditor.getLine(0);
                 if (!savingEditor.isClean() && contentWasModifiedLocally) {
                     // Changes from both sides: editor and local fs, need merging
 
@@ -1488,6 +1612,11 @@ async function syncCurrentFile(switchAwayEditor = false) {
                 // Buffer is flushed on disk at this moment. It could be interrupted
                 // by the event loop, so we use isSaving guard.
                 await writable.close();
+                if (hasSelectedDiskFolder()) {
+                    savingEditor.nativeBaselineContent = freshContent;
+                    acknowledgeNativeDraft(path, freshContent, savedTitle);
+                    if (!savingEditor.isClean()) stageNativeDraft(savingEditor);
+                }
             } else {
                 // When could that happen?
                 if (file.handle) {
@@ -1639,6 +1768,7 @@ function encodeLinkPath(path) {
 // the target point back - append a link to the source at the bottom of the
 // target, unless the target already links to it.
 async function addBacklink(sourcePath, targetPath) {
+    requireWritableWorkspace();
     if (!sourcePath || !targetPath) return;
     if (!sourcePath.startsWith('/')) sourcePath = '/' + sourcePath;
     if (!targetPath.startsWith('/')) targetPath = '/' + targetPath;
@@ -1851,16 +1981,33 @@ function findSiblingPath(path) {
     return nextPath;
 }
 
-async function removeCurrentFile() {
-    const cm = currentEditor;
-    const path = cm?.path;
-    if (!path) return;
+async function removeCurrentFile(nativeLockHeld = false, targetEditor = currentEditor, targetPath = targetEditor?.path) {
+    if (!canModifyWorkspace()) { showToast('Connect to a folder on disk before changing files.'); return; }
+    if (hasSelectedDiskFolder() && navigator.locks && !nativeLockHeld) {
+        return navigator.locks.request('files-md-native:' + selectedDiskWorkspaceID(),
+            () => removeCurrentFile(true, targetEditor, targetPath));
+    }
+    const cm = targetEditor;
+    const path = targetPath;
+    if (!path || cm?.path !== path) return;
     while (isMessingWithCurrentEditor || isSyncingFiles || isSaving) {
         await new Promise(resolve => setTimeout(resolve, 25));
     }
     if (cm.path !== path) return;
     const permanent = toDirPath(path) === '/archive';
     if (permanent && !confirm(`Permanently delete "${toFilename(path)}"?`)) return;
+    if (!permanent && hasSelectedDiskFolder() && !cm.isClean()) {
+        const before = cm.getValue();
+        const previousEditor = currentEditor;
+        try {
+            currentEditor = cm;
+            await syncCurrentFile(true, nativeLockHeld);
+        } finally { currentEditor = previousEditor; }
+        if (cm.path !== path || !cm.isClean() || cm.getValue() !== before) {
+            showToast('The note changed while preparing the archive. Review it and try again.');
+            return;
+        }
+    }
     const nextFilePath = findSiblingPath(path);
     const readOnly = cm.getOption('readOnly');
     isMessingWithCurrentEditor = true;
@@ -1874,7 +2021,7 @@ async function removeCurrentFile() {
             // Archive the visible editor contents, including edits made before
             // the autosave timer fires. A failed move must leave the editor open.
             if (!cm.isClean()) await writeIfContentIsDifferent(path, noteEditorContent(cm));
-            await moveFile(path, destination, {lockHeld: true});
+            await moveFile(path, destination, {lockHeld: true, nativeLockHeld});
         }
         cm.path = undefined;
     } catch (error) {

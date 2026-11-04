@@ -21,6 +21,31 @@ use HTTPS through a reverse proxy such as Tailscale Serve.
 When `APP_URL` uses HTTPS, opening the local server through another hostname or
 IP redirects to that configured URL, preserving the path and sign-in token.
 
+Editing and file operations are disabled until this page verifies access to a
+folder on disk. For the server workspace, authentication alone is not enough:
+the first successful directory snapshot enables editing. A reload while the
+server is unavailable stays read-only and preserves cached notes and drafts.
+Once connected, a temporary network interruption can still use the existing
+draft recovery mechanism. Rejected authentication locks editing again.
+
+The access cookie persists across browser sessions and server restarts, so a
+new tab normally reconnects without another access link. Clearing browser site
+data or revoking the token requires connecting again. Each tab remembers its
+own open note. Server tabs share the configured `NOTES_DIR`; different project
+subfolders can remain open independently.
+
+Browser-selected folders are a separate, direct-disk mode. A tab keeps its own
+folder selection through reloads and restored sessions; opening another folder
+in a different tab does not change it. New tabs default to the last selected
+browser folder. Browser permission may need to be granted again. These folders
+never upload their contents or drafts to the server workspace. Native drafts
+are journaled per folder and tab; recovery preserves competing disk edits as
+separate notes under `Conflicts/`.
+
+Only visible server tabs keep a live event stream open. Hidden tabs release
+that connection and request a fresh snapshot when made visible, avoiding idle
+tabs exhausting the browser's per-host connection limit.
+
 Configured workspaces start without sample notes, including when the notes
 directory is empty. The browser's temporary mirror is separate from its demo
 workspace. Missing browser entries never imply deletion. Deletions require an

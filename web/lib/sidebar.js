@@ -1292,6 +1292,7 @@ function isChecklist(filename) {
 }
 
 window.handleNodeMove = async function (sourcePath, targetDir) {
+    if (!canModifyWorkspace()) { showToast('Connect to a folder on disk before changing files.'); return; }
     log(`Moving ${sourcePath} to ${targetDir}/`);
 
     const memFile = getMemFile(sourcePath);
@@ -1321,6 +1322,7 @@ window.handleNodeMove = async function (sourcePath, targetDir) {
 
 // WHEN?
 window.handleDroppedFile = async function (fileName, content) {
+    if (!canModifyWorkspace()) { showToast('Connect to a folder on disk before changing files.'); return; }
     log(`Creating new file: ${fileName}`, content);
 
     if (typeof createFileFromContent === 'function') {
@@ -1405,6 +1407,7 @@ function openContextMenu(e, build, onClose) {
 // context menu: Rename/Delete for directories, Move/Delete/Rename/New dir for
 // files. Prompts are native so this works on touch via long-press, too.
 async function folderContextMenu(e, node) {
+    if (!canModifyWorkspace()) { e.preventDefault(); showToast('Connect to a folder on disk before changing files.'); return; }
     const isDir = node && node.getOptions && node.getOptions().dir === true;
     const path = node && node.path;
     if (!path || path === '/') return;

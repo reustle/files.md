@@ -1,5 +1,5 @@
 // When there's no opened local dir, a temporary FS is provided.
-// Only an unconfigured demo workspace includes welcome files.
+// An unconnected browser never creates sample notes.
 // First we try to create OPFS storage, fallback to our own in-memory FS on failure.
 
 async function getTemporaryStorageDirHandle() {
@@ -24,48 +24,7 @@ async function getTemporaryStorageDirHandle() {
             return await root.getDirectoryHandle(name, {create: true});
         }
 
-        // Skip the seed only when the LAST welcome file is already on disk.
-        // Using "any entries" as the seeded marker is racy: a reader
-        // arriving mid-seed sees the first dir already written and returns
-        // root with partial contents. Probing for a file that's written
-        // last means concurrent callers all re-run the seed (idempotent
-        // via {create:true}) and none of them returns until all welcome
-        // files exist.
-        const lastFile = Object.keys(WELCOME_FILES).pop();
-        let seeded = true;
-        try { await root.getFileHandle(lastFile); }
-        catch { seeded = false; }
-
-        if (seeded) {
-            return root;
-        }
-
-        // If a welcome file was archived (moved to /archive/), don't
-        // re-seed it. Archive flattens names, so a Set of names covers
-        // both root-level and nested welcome files.
-        const archived = new Set();
-        try {
-            const archiveDir = await root.getDirectoryHandle('archive');
-            for await (const entry of archiveDir.values()) {
-                if (entry.kind === 'file') archived.add(entry.name);
-            }
-        } catch { /* no archive dir yet */ }
-
-        async function createFiles(obj, dirHandle) {
-            for (const [name, data] of Object.entries(obj)) {
-                if (data.isFile) {
-                    if (archived.has(name)) continue;
-                    const fileHandle = await dirHandle.getFileHandle(name, { create: true });
-                    const writable = await fileHandle.createWritable();
-                    await writable.write(data.content);
-                    await writable.close();
-                } else {
-                    const subDirHandle = await dirHandle.getDirectoryHandle(removeTrailingSlash(name), { create: true });
-                    await createFiles(data, subDirHandle);
-                }
-            }
-        }
-        await createFiles(WELCOME_FILES, root);
+        // An unconnected browser may read its old cache, but never seed notes.
 
         return root;
     } catch (e) {
@@ -87,25 +46,9 @@ function getMemFSRoot() {
     if (memFSRoot) return memFSRoot;
 
     memFSRoot = new MemDir('');
-    function populate(obj, parent) {
-        for (const [name, data] of Object.entries(obj)) {
-            if (data.isFile) {
-                const file = new MemFile(name, data.content || '');
-                file.parent = parent;
-                parent.entries[name] = file;
-            } else {
-                const dir = new MemDir(removeTrailingSlash(name));
-                parent.entries[dir.name] = dir;
-                populate(data, dir);
-            }
-        }
-    }
     if (localStorage.getItem('apiUrl')) {
-        // Memory disappears on reload; its persisted server snapshot must too.
-        localStorage.removeItem(SERVER_STORAGE_KEY);
+        // Memory disappears on reload; rebuild this tab's server snapshot.
         server = {files: {}, media: {}, timestamps: {}, mediaTimestamp: 0};
-    } else {
-        populate(WELCOME_FILES, memFSRoot);
     }
 
     return memFSRoot;

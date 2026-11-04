@@ -387,6 +387,7 @@ class MoveModal {
     }
 
     open() {
+        if (!canModifyWorkspace()) { showToast('Connect to a folder on disk before changing files.'); return; }
         searchModal.close();
 
         let modal = document.getElementById('move');

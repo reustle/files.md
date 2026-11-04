@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "description": "E2E tests for text editor webapp",
   "scripts": {
-    "test": "playwright test",
+    "test": "node local-safety.cjs",
     "test:safety": "node local-safety.cjs",
-    "test:headed": "playwright test --headed",
-    "test:ui": "playwright test --ui",
-    "test:debug": "playwright test --debug",
+    "test:legacy": "playwright test",
+    "test:legacy:headed": "playwright test --headed",
+    "test:legacy:ui": "playwright test --ui",
+    "test:legacy:debug": "playwright test --debug",
     "install:browsers": "playwright install"
   },
   "devDependencies": {
