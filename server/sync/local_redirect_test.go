@@ -68,3 +68,41 @@ func TestAlternateHostRedirectOnlyAppliesToSecureLocalServer(t *testing.T) {
 		require.Empty(t, response.Header().Get("Location"))
 	}
 }
+
+func TestReconnectIsNotBlockedByAnotherTabsMissingOrStaleCookie(t *testing.T) {
+	old := config.ServerCfg
+	t.Cleanup(func() { config.ServerCfg = old })
+	config.ServerCfg = config.Config{RequireSafeSync: true, TokensDir: t.TempDir()}
+	const validToken = "reconnect-test-token"
+	require.NoError(t, os.WriteFile(filepath.Join(config.ServerCfg.TokensDir, hashToken(validToken)), []byte("1"), 0600))
+	const remote = "192.0.2.245:1234"
+	const ip = "192.0.2.245"
+	t.Cleanup(func() {
+		blockedIPsMutex.Lock()
+		delete(blockedIPs, ip)
+		blockedIPsMutex.Unlock()
+	})
+	handler := tokenMiddleware(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	for _, step := range []struct {
+		token  string
+		status int
+	}{
+		{"", http.StatusUnauthorized},
+		{validToken, http.StatusNoContent},
+		{"stale-token", http.StatusUnauthorized},
+		{validToken, http.StatusNoContent},
+		{"stale-token", http.StatusTooManyRequests},
+		{"", http.StatusUnauthorized},
+		{validToken, http.StatusNoContent},
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/notes/sync", nil)
+		request.RemoteAddr = remote
+		request.Header.Set("X-FilesMD-Sync", "3")
+		if step.token != "" {
+			request.AddCookie(&http.Cookie{Name: AuthCookieName, Value: step.token})
+		}
+		response := httptest.NewRecorder()
+		handler(response, request)
+		require.Equal(t, step.status, response.Code)
+	}
+}

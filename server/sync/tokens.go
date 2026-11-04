@@ -161,16 +161,6 @@ func tokenMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		ip := getIPFromRemoteAddr(r.RemoteAddr)
 
-		blockedIPsMutex.RLock()
-		blockedUntil, isBlocked := blockedIPs[ip]
-		blockedIPsMutex.RUnlock()
-		if isBlocked && time.Now().Before(blockedUntil) {
-			// 429s are too noisy to log — a blocked IP can replay them every
-			// few seconds. The originating 401 has already been recorded.
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-
 		// Try cookie first, fall back to Authorization header.
 		var token string
 		fromCookie := false
@@ -182,8 +172,24 @@ func tokenMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			token = r.Header.Get("Authorization")
 		}
 
+		// A browser without a session is normal during reconnect. It must not
+		// ban other tabs or users behind the same reverse proxy/IP address.
+		if token == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+
 		userID, ok := findUserID(token)
 		if !ok {
+			// Throttle invalid credentials, but let a valid session reconnect
+			// even if another tab previously supplied a stale token.
+			blockedIPsMutex.RLock()
+			blockedUntil, isBlocked := blockedIPs[ip]
+			blockedIPsMutex.RUnlock()
+			if isBlocked && time.Now().Before(blockedUntil) {
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
 			blockedIPsMutex.Lock()
 			blockedIPs[ip] = time.Now().Add(BanForInvalidToken)
 			blockedIPsMutex.Unlock()
