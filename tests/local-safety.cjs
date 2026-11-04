@@ -13,6 +13,18 @@ const verifyArchiveSafety = require('./archive-safety.cjs');
 
 const repo = path.resolve(__dirname, '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const fixtureTimeoutMs = Number(process.env.SAFETY_FIXTURE_TIMEOUT_MS || 120000);
+assert.ok(Number.isFinite(fixtureTimeoutMs) && fixtureTimeoutMs > 0, 'SAFETY_FIXTURE_TIMEOUT_MS must be positive');
+
+async function withTimeout(work, milliseconds, message) {
+    let timer;
+    try {
+        return await Promise.race([
+            work,
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), milliseconds); }),
+        ]);
+    } finally { clearTimeout(timer); }
+}
 const originals = {
     'Original.md': 'Original content',
     'Plain.md': 'Plain text content',
@@ -307,8 +319,12 @@ async function verifyFocusDuringRename(page, notes) {
         await syncLocalNotes();
         await openFile('/Focus source.md');
         await openFile('/Focus other.md', false, 'editor2-textarea');
-        currentEditor = editor;
         editor.focus();
+        // Let focus handlers queued while openFile held its lock settle before
+        // selecting the initiating pane. Otherwise syncCurrentFile can safely
+        // no-op and the test would wait forever for an interceptor never reached.
+        await new Promise(resolve => setTimeout(resolve, 50));
+        currentEditor = editor;
         editor.setValue('# Focus renamed\nSource body');
         const original = getFileHandle;
         let release, arrived;
@@ -323,7 +339,7 @@ async function verifyFocusDuringRename(page, notes) {
         };
         try {
             const saving = syncCurrentFile();
-            await reached;
+            await waitForSafetyGate(reached, saving, 'rename destination');
             editor2.focus();
             await new Promise(resolve => setTimeout(resolve, 50));
             if (currentEditor !== editor) throw new Error('Focus changed the editor during rename');
@@ -388,7 +404,7 @@ async function verifyInflightEdits(page, notes) {
         try {
             currentEditor.setValue('# Hash\nFirst in-flight edit');
             const saving = syncLocalNotes();
-            await reached;
+            await waitForSafetyGate(reached, saving, 'write response');
             currentEditor.setValue('# Hash\nNewest in-flight edit');
             release();
             await saving;
@@ -416,7 +432,7 @@ async function verifyInflightEdits(page, notes) {
         };
         try {
             const deleting = syncLocalNotes();
-            await reached;
+            await waitForSafetyGate(reached, deleting, 'deletion response');
             await write('/Recreated.md', 'Recreated while deletion was in flight');
             release();
             await deleting;
@@ -545,13 +561,38 @@ async function runCase(binary, browserType, volatile, empty) {
     let browser;
     let page;
     let passed = false;
-    try {
+    let currentPhase = 'server startup';
+    const startedAt = Date.now();
+    const phase = async name => {
+        currentPhase = name;
+        const detail = {label, phase: name, elapsedMs: Date.now() - startedAt};
+        logs.push(JSON.stringify(detail));
+        await fs.writeFile(path.join(root, 'phase.json'), JSON.stringify(detail, null, 2));
+        console.log(`PHASE ${label}: ${name}`);
+    };
+    const run = async () => {
+        await phase('server startup');
         await waitForServer(child, url, root);
         const listeners = await promisify(execFile)('ss', ['-ltn']);
         assert.ok(listeners.stdout.includes(`0.0.0.0:${port}`), 'Test server must listen on all IPv4 interfaces');
         const executablePath = browserType === chromium ? process.env.CHROMIUM_BIN : process.env.FIREFOX_BIN;
+        await phase('browser startup');
         browser = await browserType.launch({headless: true, ...(executablePath ? {executablePath} : {})});
         const context = await browser.newContext({serviceWorkers: browserType === chromium && !volatile && !empty ? 'allow' : 'block'});
+        await context.addInitScript(() => {
+            window.waitForSafetyGate = async (gate, operation, label) => {
+                let timer;
+                try {
+                    await Promise.race([
+                        gate,
+                        operation.then(() => { throw new Error(`Operation completed before test gate: ${label}`); }),
+                        new Promise((_, reject) => {
+                            timer = setTimeout(() => reject(new Error(`Timed out waiting for test gate: ${label}`)), 10000);
+                        }),
+                    ]);
+                } finally { clearTimeout(timer); }
+            };
+        });
         if (volatile) {
             await context.addInitScript(() => {
                 Object.defineProperty(FileSystemFileHandle.prototype, 'createWritable', {value: undefined, configurable: true});
@@ -564,6 +605,7 @@ async function runCase(binary, browserType, volatile, empty) {
             errors.push(`Unexpected dialog: ${dialog.message()}`);
             dialog.dismiss();
         });
+        await phase('authentication and startup');
         // A plain link in a fresh browser must explain that login is needed.
         // Probing the session must not ban the subsequent authenticated sync.
         await page.goto(url);
@@ -584,6 +626,7 @@ async function runCase(binary, browserType, volatile, empty) {
         await assertNoSamples(page);
         assert.deepEqual(await snapshot(notes), baseline, 'Startup changed the supplied folder');
 
+        await phase('blur and reload');
         // Exercise the original trigger: downloading files, then a blur sync.
         await Promise.all([
             page.waitForResponse(response => response.url().endsWith('/notes/sync')),
@@ -604,6 +647,7 @@ async function runCase(binary, browserType, volatile, empty) {
         await assertNoSamples(page);
         assert.deepEqual(await snapshot(notes), baseline, 'Reload or repeated sync changed the supplied folder');
 
+        await phase(empty ? 'first note' : 'mutation safety');
         if (empty) {
             // Empty first sync must still initialize the server snapshot.
             await page.evaluate(async () => {
@@ -711,30 +755,48 @@ async function runCase(binary, browserType, volatile, empty) {
             await assert.rejects(fs.stat(path.join(notes, 'moved/Original.md')), {code: 'ENOENT'});
         }
         if (!empty) {
-            await verifyLiveChanges(page, notes);
-            await verifyNestedFolders(page, notes);
-            await verifyFolderOperations(page, notes);
-            await verifyExactContents(page, notes);
-            await verifyFocusDuringRename(page, notes);
-            await verifyTitleRecoveryAndSplitPane(page, notes);
-            await verifyInflightEdits(page, notes);
-            await verifyPushEvents(page, notes);
-            await verifyStorageFailure(page);
-            await verifyDurableConcurrentDrafts(page, notes);
-            await verifyArchiveSafety(page, notes);
+            const checks = [
+                verifyLiveChanges, verifyNestedFolders, verifyFolderOperations,
+                verifyExactContents, verifyFocusDuringRename, verifyTitleRecoveryAndSplitPane,
+                verifyInflightEdits, verifyPushEvents, verifyStorageFailure,
+                verifyDurableConcurrentDrafts, verifyArchiveSafety,
+            ];
+            for (const check of checks) {
+                await phase(check.name);
+                await check(page, notes);
+            }
         }
-        if (browserType === chromium && !volatile && !empty) await verifyFolderPicker(page);
+        if (browserType === chromium && !volatile && !empty) {
+            await phase('verifyFolderPicker');
+            await verifyFolderPicker(page);
+        }
         assert.deepEqual(errors, []);
         passed = true;
         console.log(`PASS ${label}`);
+    };
+    try {
+        await withTimeout(run(), fixtureTimeoutMs, `Fixture exceeded ${fixtureTimeoutMs}ms: ${label}`);
     } catch (error) {
+        await fs.writeFile(path.join(root, 'failure.json'), JSON.stringify({
+            label, phase: currentPhase, elapsedMs: Date.now() - startedAt,
+            error: error.stack || String(error), errors,
+        }, null, 2));
         await fs.writeFile(path.join(root, 'browser.log'), logs.join('\n'));
-        console.error(`FAIL ${label}; fixture retained: ${root}`, errors);
+        console.error(`FAIL ${label} during ${currentPhase}; fixture retained: ${root}`, error, errors);
         throw error;
     } finally {
-        if (browser) await browser.close();
+        // Closing the browser rejects any outstanding page.evaluate and releases
+        // injected gates. Never let a hung cleanup hide the original failure.
+        if (browser) {
+            try { await withTimeout(browser.close(), 5000, 'Browser cleanup timed out'); }
+            catch (error) { console.error(`Cleanup ${label}: ${error.message}`); }
+        }
         child.kill('SIGTERM');
-        await exited;
+        try { await withTimeout(exited, 3000, 'Test server cleanup timed out'); }
+        catch {
+            child.kill('SIGKILL');
+            await withTimeout(exited, 3000, 'Test server did not exit after SIGKILL');
+        }
         if (passed) await fs.rm(root, {recursive: true, force: true});
     }
 }
