@@ -18,6 +18,8 @@ Build with `go build -o /path/to/server ./cmd/local-server`. The server writes a
 private `login-url` file in its working directory on startup. The link expires
 after ten minutes; existing login cookies survive restarts. For remote access,
 use HTTPS through a reverse proxy such as Tailscale Serve.
+When `APP_URL` uses HTTPS, opening the local server through another hostname or
+IP redirects to that configured URL, preserving the path and sign-in token.
 
 Configured workspaces start without sample notes, including when the notes
 directory is empty. The browser's temporary mirror is separate from its demo

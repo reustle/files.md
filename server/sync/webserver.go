@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime/debug"
 	"strconv"
@@ -131,6 +132,18 @@ func router(serverLogger *log.Logger) *http.ServeMux {
 		if appHost := config.ServerCfg.AppHost(); appHost != "" && r.Host == appHost {
 			http.FileServer(http.Dir("./web")).ServeHTTP(w, r)
 			return
+		}
+		// A local server bound to all interfaces is also reached by its short
+		// hostname or IP. Send those entry points to the configured secure origin
+		// so login cookies and browser storage work, preserving sign-in tokens.
+		if config.ServerCfg.RequireSafeSync {
+			target, err := url.Parse(config.ServerCfg.AppURL)
+			if err == nil && target.Scheme == "https" && target.Host != "" {
+				target.Path, target.RawPath, target.RawQuery = r.URL.Path, r.URL.RawPath, r.URL.RawQuery
+				w.Header().Set("Cache-Control", "no-store")
+				http.Redirect(w, r, target.String(), http.StatusTemporaryRedirect)
+				return
+			}
 		}
 
 		http.NotFound(w, r)
