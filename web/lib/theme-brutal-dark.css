@@ -46,22 +46,6 @@
     stroke: var(--color-neo-orange) !important;
 }
 
-#close-chat, #fullscreen-chat {
-    color: var(--col-tx-alt) !important;
-}
-
-#open-chat-modal:hover svg {
-   stroke: var(--col-accent) !important;
-}
-
-#close-chat:hover, #fullscreen-chat:hover {
-    color: var(--color-neo-orange) !important;
-}
-
-#open-chat-modal svg {
-    stroke: #F5F5F5 !important;
-}
-
 #close-sidebar, #close-editor2, #go-forward svg, #go-backward svg {
     color: var(--col-tx-alt) !important;
     stroke: var(--col-tx-alt) !important;
@@ -86,23 +70,6 @@
 
 #open-sidebar {
     background: var(--col-bg-alt);
-}
-
-.message.own {
-    background: color-mix(in srgb, var(--col-bg) 60%, transparent);
-}
-
-.to-recent-btn,
-.action-btn svg {
-    fill: var(--col-tx-alt);
-    color: var(--col-tx-alt) !important;
-    stroke: var(--col-tx-alt) !important;
-}
-.to-recent-btn:hover,
-.action-btn:hover svg {
-    fill: var(--col-accent);
-    color: var(--col-accent) !important;
-    stroke: var(--col-accent) !important;
 }
 
 /* Headers: heavy weight + a hard light rule under H1 / H2. */
@@ -370,7 +337,6 @@
     background: color-mix(in srgb, var(--color-neo-blue), transparent 60%) !important;
 }
 
-
 .tree-container li span.tree-item {
     border-radius: 0 !important;
 }
@@ -400,36 +366,6 @@
     border-radius: 0 !important;
 }
 
-.message {
-    transition: background 0.15s ease !important;
-}
-.message:hover {
-    background: #000 !important;
-}
-.complete-btn:hover {
-    background: transparent !important;
-}
-#chat .message-content,
-#chat .message-content:hover {
-    background: transparent !important;
-    cursor: pointer !important;
-}
-.message-content.editing {
-    background: color-mix(in srgb, var(--color-neo-lime) 25%, transparent) !important;
-    border: 1px solid var(--color-neo-blue) !important;
-}
-.message-time {
-    color: var(--col-tx-alt) !important;
-}
-.action-btn:hover {
-    background: var(--color-neo-orange) !important;
-}
-.message.actions-pinned,
-.message.selected {
-    background: color-mix(in srgb, var(--color-neo-blue) 18%, transparent) !important;
-    border-color: var(--color-neo-blue) !important;
-}
-
 .cm-s-hypermd-light .CodeMirror-line {
     line-height: 1.9 !important;
 }
@@ -443,21 +379,8 @@
     font-size: 28px !important;
     margin-bottom: 20px !important;
 }
-#search, #move,
-#search-input, #move-input,
-.message-content,
-.message-actions,
-.CodeMirror-hints,
-.CodeMirror-hint,
-.sidebar-ctx-menu {
+#search, #move, #search-input, #move-input, .CodeMirror-hints, .CodeMirror-hint, .sidebar-ctx-menu {
     border-radius: 0 !important;
-}
-
-#chat-container.modal {
-    border-radius: 7px !important;
-}
-#chat-input {
-    border-radius: 6px !important;
 }
 
 .CodeMirror-hints,

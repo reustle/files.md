@@ -1,15 +1,42 @@
 package sync
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/zakirullin/files.md/server/config"
 )
+
+func TestWorkspacePathIsOnlyShownToAuthenticatedLocalUsers(t *testing.T) {
+	old := config.ServerCfg
+	t.Cleanup(func() { config.ServerCfg = old })
+	config.ServerCfg = config.Config{RequireSafeSync: true, LocalNotesDir: "/notes/Personal", TokensDir: t.TempDir()}
+	const token = "workspace-label-test"
+	require.NoError(t, os.WriteFile(filepath.Join(config.ServerCfg.TokensDir, hashToken(token)), []byte("1"), 0600))
+	for _, authenticated := range []bool{false, true} {
+		request := httptest.NewRequest(http.MethodGet, "/session", nil)
+		if authenticated {
+			request.AddCookie(&http.Cookie{Name: AuthCookieName, Value: token})
+		}
+		response := httptest.NewRecorder()
+		SessionStatus(response, request)
+		var status map[string]any
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &status))
+		require.Equal(t, authenticated, status["authenticated"])
+		if authenticated {
+			require.Equal(t, "/notes/Personal", status["workspacePath"])
+		} else {
+			require.NotContains(t, status, "workspacePath")
+		}
+	}
+}
 
 func TestLocalAlternateHostRedirectsToConfiguredHTTPS(t *testing.T) {
 	old := config.ServerCfg

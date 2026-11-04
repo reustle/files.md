@@ -12,7 +12,8 @@ import (
 // APIURL / AppURL carry the full scheme+host (e.g. "https://api.files.md").
 // Hostnames are derived from them on demand via APIHost()/AppHost().
 type Config struct {
-	RequireSafeSync   bool `envconfig:"REQUIRE_SAFE_SYNC"`
+	RequireSafeSync   bool   `envconfig:"REQUIRE_SAFE_SYNC"`
+	LocalNotesDir     string `ignored:"true"`
 	WorkingDir        string
 	StorageDir        string `default:"./storage"  envconfig:"STORAGE_DIR"`
 	BotAPIToken       string `required:"false" envconfig:"BOT_API_TOKEN"`

@@ -10,6 +10,7 @@ const {spawn, execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const assert = require('node:assert/strict');
 const verifyArchiveSafety = require('./archive-safety.cjs');
+const {verifyNotesOnlyUI, verifyFormerInbox, verifyInvalidatedSave} = require('./notes-only.cjs');
 
 const repo = path.resolve(__dirname, '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -26,6 +27,7 @@ async function withTimeout(work, milliseconds, message) {
     } finally { clearTimeout(timer); }
 }
 const originals = {
+    'Chat.md': '#### Existing inbox\n- [ ] Keep this existing text\n',
     'Original.md': 'Original content',
     'Plain.md': 'Plain text content',
     'Help.md': 'My own help note',
@@ -127,6 +129,7 @@ async function verifyFolderPicker(page) {
         helpContent: 'Existing help must survive opening a folder',
         removed: true,
     });
+    assert.equal(await page.locator('#workspace-path').innerText(), 'selected-test-folder');
     await assertNoSamples(page);
 }
 
@@ -202,7 +205,7 @@ async function verifyNestedFolders(page, notes) {
         await fs.writeFile(path.join(notes, name), 'Nested note content');
     }
     await fs.mkdir(path.join(notes, 'Empty from disk'));
-    await page.waitForFunction(deep => !isSyncingFiles && getMemFile('/' + deep), deep);
+    await page.waitForFunction(deep => !isSyncingFiles && getMemFile('/' + deep) && files['Empty from disk/'], deep);
     const result = await page.evaluate(async deep => {
         files = await loadLocalFiles(await getRootDirHandle());
         renderSidebar();
@@ -245,7 +248,7 @@ async function verifyNestedFolders(page, notes) {
         await syncCurrentFile();
     }, deep);
     assert.equal(await fs.readFile(path.join(notes, deep), 'utf8'), 'Edited Nested note content');
-    await page.evaluate(async () => { currentEditor.markClean(); await openChat(); });
+    await page.evaluate(async () => { currentEditor.markClean(); await openFile('/Help.md'); });
 }
 
 async function verifyExactContents(page, notes) {
@@ -348,7 +351,7 @@ async function verifyFocusDuringRename(page, notes) {
         } finally { release(); getFileHandle = original; }
         await syncLocalNotes();
         currentEditor.markClean();
-        await openChat();
+        await openFile('/Help.md');
     });
     assert.equal(await fs.readFile(path.join(notes, 'Focus renamed.md'), 'utf8'), 'Source body');
     assert.equal(await fs.readFile(path.join(notes, 'Focus other.md'), 'utf8'), 'Other pane body');
@@ -377,7 +380,7 @@ async function verifyTitleRecoveryAndSplitPane(page, notes) {
         await syncCurrentFile();
         await syncLocalNotes();
         currentEditor.markClean();
-        await openChat();
+        await openFile('/Help.md');
     });
     assert.equal(await fs.readFile(path.join(notes, 'Recovered title.md'), 'utf8'), 'Body survives title changes');
     await assert.rejects(fs.stat(path.join(notes, 'Title crash.md')), {code: 'ENOENT'});
@@ -411,7 +414,7 @@ async function verifyInflightEdits(page, notes) {
             if (localDrafts['/Hash.md']?.content !== 'Newest in-flight edit') throw new Error('Response discarded newer typing');
         } finally { release(); window.fetch = originalFetch; }
         await syncCurrentFile();
-        await openChat();
+        await openFile('/Help.md');
     });
     assert.equal(await fs.readFile(path.join(notes, 'Hash.md'), 'utf8'), 'Newest in-flight edit');
     await page.evaluate(async () => {
@@ -448,7 +451,7 @@ async function verifyPushEvents(page, notes) {
     await page.evaluate(async () => {
         clearInterval(localSyncTimer);
         clearInterval(window.saver);
-        await openChat();
+        await openFile('/Help.md');
     });
     try {
         await fs.writeFile(path.join(notes, 'Pushed.md'), 'Pushed without browser polling');
@@ -526,7 +529,7 @@ async function verifyStorageFailure(page) {
     assert.equal(result.failed, true);
     assert.match(result.notice, /Keep this tab open/);
     assert.match(result.content, /Keep this text/);
-    await page.evaluate(async () => { await syncCurrentFile(); await openChat(); });
+    await page.evaluate(async () => { await syncCurrentFile(); await openFile('/Help.md'); });
 }
 
 async function runCase(binary, browserType, volatile, empty) {
@@ -625,6 +628,11 @@ async function runCase(binary, browserType, volatile, empty) {
         }
         await assertNoSamples(page);
         assert.deepEqual(await snapshot(notes), baseline, 'Startup changed the supplied folder');
+        await verifyNotesOnlyUI(page, notes);
+        if (!empty) {
+            await page.waitForFunction(() => !!currentEditor.path && !isMessingWithCurrentEditor);
+            assert.ok(Object.hasOwn(baseline, (await page.evaluate(() => currentEditor.path)).slice(1)), 'Startup should open an existing note');
+        }
 
         await phase('blur and reload');
         // Exercise the original trigger: downloading files, then a blur sync.
@@ -649,13 +657,18 @@ async function runCase(binary, browserType, volatile, empty) {
 
         await phase(empty ? 'first note' : 'mutation safety');
         if (empty) {
-            // Empty first sync must still initialize the server snapshot.
+            // Empty startup stays empty, then the actual New File action opens
+            // a writable note instead of leaving the blank editor disabled.
+            assert.equal(await page.evaluate(() => currentEditor.path), undefined);
+            await page.click('#new-file');
+            await page.waitForFunction(() => currentEditor.path === '/New file.md' && !isMessingWithCurrentEditor);
+            assert.equal(await page.evaluate(() => currentEditor.getOption('readOnly')), false);
+            await page.keyboard.type('My first real note');
             await page.evaluate(async () => {
-                await write('/First.md', 'My first real note');
-                files = await loadLocalFiles(await getRootDirHandle());
+                await syncCurrentFile();
                 await syncFilesWithServer();
             });
-            assert.deepEqual(await snapshot(notes), {'First.md': 'My first real note'});
+            assert.deepEqual(await snapshot(notes), {'New file.md': 'My first real note'});
         } else {
             const statuses = await page.evaluate(async () => ({
                 md: (await getFileStatus('/Original.md')).status,
@@ -749,7 +762,7 @@ async function runCase(binary, browserType, volatile, empty) {
                 await syncCurrentFile();
                 await syncFilesWithServer();
                 currentEditor.markClean();
-                await openChat();
+                await openFile('/Help.md');
             });
             assert.equal(await fs.readFile(path.join(notes, 'moved/Renamed by header.md'), 'utf8'), 'Edited content');
             await assert.rejects(fs.stat(path.join(notes, 'moved/Original.md')), {code: 'ENOENT'});
@@ -759,7 +772,7 @@ async function runCase(binary, browserType, volatile, empty) {
                 verifyLiveChanges, verifyNestedFolders, verifyFolderOperations,
                 verifyExactContents, verifyFocusDuringRename, verifyTitleRecoveryAndSplitPane,
                 verifyInflightEdits, verifyPushEvents, verifyStorageFailure,
-                verifyDurableConcurrentDrafts, verifyArchiveSafety,
+                verifyDurableConcurrentDrafts, verifyArchiveSafety, verifyFormerInbox, verifyInvalidatedSave,
             ];
             for (const check of checks) {
                 await phase(check.name);

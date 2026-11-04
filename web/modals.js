@@ -2,7 +2,6 @@ class SearchModal {
     static RECENT_RESULTS = 15;
 
     constructor() {
-        this.selectedMsgElement = null;
         this.focusedIndex = 0;
         this.searchId = 0;
         this.fullText = false;
@@ -32,11 +31,7 @@ class SearchModal {
                 this.close();
                 event.preventDefault();
                 event.stopPropagation();
-                if (isChat) {
-                    chatInput.focus();
-                } else {
-                    currentEditor.focus();
-                }
+                currentEditor.focus();
             }
         });
 
@@ -73,9 +68,9 @@ class SearchModal {
                 // Get all files from the specified folder
                 const folderResults = [];
                 for (const filename in files[folderName]) {
+                    if (!files[folderName][filename].isFile) continue;
                     folderResults.push({
-                        filename: filename,
-                        dir: folderName,
+                        path: joinPath('/', folderName, filename),
                         score: 100 // Give max score since it's an exact folder match
                     });
                 }
@@ -119,8 +114,7 @@ class SearchModal {
         if (files[search]) {
             for (const filename in files[search]) {
                 results.push({
-                    filename: filename,
-                    dir: search,
+                    path: joinPath('/', search, filename),
                     score: 100
                 });
             }
@@ -137,8 +131,7 @@ class SearchModal {
                     const potentialMatch = filename.replace(/\.md$/, '');
                     if (potentialMatch.toLowerCase().includes(fileName.toLowerCase())) {
                         results.push({
-                            filename: filename,
-                            dir: dirName,
+                            path: joinPath('/', dirName, filename),
                             score: 95
                         });
                     }
@@ -196,7 +189,7 @@ class SearchModal {
 
     async searchContent(searchId) {
         const query = document.getElementById('search-input').value.toLowerCase();
-        if (this.selectedMsgElement !== null || query.length < 3) return;
+        if (query.length < 3) return;
 
         await new Promise(r => setTimeout(r, 150));
         if (searchId !== this.searchId) return;
@@ -244,7 +237,7 @@ class SearchModal {
             item.append(snippetEl, pathEl);
             item.setAttribute('data-path', path);
             item.setAttribute('data-line', line);
-            item.onclick = () => this.moveToFile(path, line);
+            item.onclick = () => this.openResult(path, line);
             item.onmousemove = () => {
                 this.focusedIndex = Array.from(list.children).indexOf(item);
                 this.updateFocusedItem();
@@ -254,247 +247,66 @@ class SearchModal {
         this.updateFocusedItem();
     }
 
-    open(text = '', buttonElement = null, messageElement = null, fullText = false) {
+    open(text = '', fullText = false) {
         moveModal.close();
-        this.selectedMsgElement = messageElement;
         this.fullText = fullText;
-
-        let modal = document.getElementById('search');
+        const modal = document.getElementById('search');
         modal.style.display = 'flex';
-
-        const inputField = document.getElementById('search-input');
-        inputField.value = text;
-        inputField.placeholder = fullText ? 'Search in files...' : 'Go to file...';
-        inputField.focus();
-
+        modal.style.top = '30%';
+        modal.style.left = '50%';
+        modal.style.transform = 'translate(-50%, 0)';
+        const input = document.getElementById('search-input');
+        input.value = text;
+        input.placeholder = fullText ? 'Search in files...' : 'Go to file...';
+        input.focus();
         this.focusedIndex = 0;
-        const goToFileResults = document.getElementById('search-results');
-        goToFileResults.innerHTML = '';
-
-        if (text === '' && fullText) {
-            ++this.searchId;
-        } else if (text === '' && this.selectedMsgElement === null) {
-            this.showRecentFiles();
-        } else if (text === '') {
-            this.showRootFiles();
-        } else {
-            this.search();
-        }
-
-        if (buttonElement && this.selectedMsgElement !== null) {
-            const rect = buttonElement.getBoundingClientRect();
-            const modalHeight = 300;
-            const viewportHeight = window.innerHeight;
-            const spaceBelow = viewportHeight - rect.bottom;
-            const spaceAbove = rect.top;
-
-            // TODO move to css
-            const positionAbove = spaceBelow < modalHeight && spaceAbove > spaceBelow;
-            modal.style.position = 'fixed';
-
-            modal.style.left = '50%';
-            modal.style.transform = 'translateX(-50% + 150px)';
-            modal.style.width = '320px';
-
-            if (positionAbove) {
-                modal.style.bottom = `${viewportHeight - rect.top + 5}px`;
-                modal.style.top = '';
-                // Reverse the order: results on top, input at bottom
-                modal.classList.add('modal-reversed');
-            } else {
-                modal.style.top = `${rect.bottom + 5}px`;
-                modal.style.bottom = '';
-                // Normal order: input on top, results below
-                modal.classList.remove('modal-reversed');
-            }
-        } else {
-            // Default center position
-            modal.style.position = 'fixed';
-            modal.style.top = '30%';
-            modal.style.bottom = '';
-            modal.style.left = '50%';
-            modal.style.right = '';
-            modal.style.transform = 'translate(-50%, 0)';
-            modal.style.width = '';
-            modal.classList.remove('modal-reversed');
-        }
+        document.getElementById('search-results').innerHTML = '';
+        if (text === '' && fullText) ++this.searchId;
+        else if (text === '') this.showRecentFiles();
+        else this.search();
     }
 
     close() {
         document.getElementById('search').style.display = 'none';
-        document.getElementById('search').classList.remove('modal-reversed');
-        // Drop the keep-actions-visible flag set by to-file-btn (today.js).
-        document.querySelectorAll('.message.actions-pinned')
-            .forEach(m => m.classList.remove('actions-pinned'));
-        this.selectedMsgElement = null;
     }
 
     showResults(results) {
         const list = document.getElementById('search-results');
         list.innerHTML = '';
-
-        const focusOnHover = (item) => {
-            item.onmousemove = () => {
-                document.querySelectorAll('#search-results li').forEach(li => li.classList.remove('focused'));
-                item.classList.add('focused');
-                this.focusedIndex = Array.from(list.children).indexOf(item);
-            };
-        };
-        const addDirItem = (dir) => {
-            const dataDir = dir === '/' ? '' : dir;
-            const item = document.createElement('li');
-            item.textContent = dir === '/' ? '/' : (dir + '/');
-            item.setAttribute('data-dir', dataDir);
-            item.onclick = () => this.moveToDir(dataDir);
-            focusOnHover(item);
-            list.appendChild(item);
-        };
-        const addFileItem = (path) => {
+        for (const {path} of results) {
+            if (path === CONFIG_PATH) continue;
             const item = document.createElement('li');
             const title = trimPostfix(trimPostfix(toFilename(path), '.md'), '.txt');
-            const dirName = toDirPath(path);
-            item.textContent = dirName === '/' ? title : trimPrefix(`${dirName}/${title}`, '/');
+            const dir = toDirPath(path);
+            item.textContent = dir === '/' ? title : trimPrefix(`${dir}/${title}`, '/');
             item.setAttribute('data-path', path);
-            item.onclick = () => this.moveToFile(path);
-            focusOnHover(item);
+            item.onclick = () => this.openResult(path);
+            item.onmousemove = () => {
+                this.focusedIndex = Array.from(list.children).indexOf(item);
+                this.updateFocusedItem();
+            };
             list.appendChild(item);
-        };
-
-        if (this.selectedMsgElement !== null) {
-            // Move-to-file order: /, then root files, then folders, then other files.
-            const searchVal = (document.getElementById('search-input').value || '').toLowerCase();
-            const dirs = this.getDirs().filter(d => searchVal === '' || d.toLowerCase().includes(searchVal));
-            const files = results.filter(({path}) => path !== CONFIG_PATH && path !== CHAT_PATH);
-            const rootFiles = files.filter(({path}) => toDirPath(path) === '/');
-            const subFiles = files.filter(({path}) => toDirPath(path) !== '/');
-
-            if (dirs.includes('/')) addDirItem('/');
-            rootFiles.forEach(({path}) => addFileItem(path));
-            dirs.filter(d => d !== '/').forEach(addDirItem);
-            subFiles.forEach(({path}) => addFileItem(path));
-        } else {
-            results.forEach(({path}) => {
-                if (path === CONFIG_PATH) return;
-                addFileItem(path);
-            });
         }
-
         this.focusedIndex = 0;
         this.updateFocusedItem();
     }
 
-    getDirs() {
-        let dirs = ['/'];
-        for (const dir of Object.keys(files)) {
-            if (!dir.endsWith('/')) continue;
-            const name = trimPostfix(dir, '/');
-            if (SYSTEM_DIRS.includes(name)) continue;
-            dirs.push(name);
+    async openResult(path, line) {
+        await openFile(path);
+        if (line !== undefined) {
+            currentEditor.setCursor({line, ch: 0});
+            currentEditor.scrollIntoView(null, currentEditor.getScrollInfo().clientHeight / 2);
         }
-        dirs.sort((a, b) => {
-            return a.includes('_') - b.includes('_') || a.localeCompare(b);
-        });
-        return dirs;
-    }
-
-    async moveToDir(toDir) {
-        if (this.selectedMsgElement === null) {
-            this.close();
-            return;
-        }
-
-        const selectedMessages = document.querySelectorAll('.message.selected');
-        let msgs = [];
-        let messagesToRemove = [];
-        if (selectedMessages.length > 0) {
-            msgs = Array.from(selectedMessages).map(m => m.querySelector('.message-content').dataset.text);
-            messagesToRemove = selectedMessages;
-        } else {
-            msgs = [this.selectedMsgElement.querySelector('.message-content').dataset.text];
-            messagesToRemove = [this.selectedMsgElement];
-        }
-
-        const destinations = [];
-        for (const msg of msgs) {
-            const [header, body] = extractHeaderAndBody(msg, MAX_TITLE_LENGTH);
-            const path = joinPath('/', toDir, sanitizeFilename(header)) + '.md';
-            destinations.push(path);
-            await moveFromChat(msg, async () => {
-                await write(path, body);
-                addMemFile(path, {
-                    isFile: true,
-                    content: body,
-                    lastModified: 0,
-                    path: path,
-                    handle: await getFileHandle(path),
-                });
-                setServerFile(path, body, 0);
-                saveServerFiles();
-            });
-            await renderMessages();
-        }
-
-        messagesToRemove.forEach(message => {
-            if (!message) return;
-            message.classList.add('removing');
-            setTimeout(() => message.remove(), 300);
-        });
-        chatInput.focus();
-        renderSidebar('', destinations);
         this.close();
-    }
-
-    async moveToFile(path, line) {
-        if (this.selectedMsgElement !== null) {
-            const selectedMessages = document.querySelectorAll('.message.selected');
-
-            let msgs = [];
-            let messagesToRemove = [];
-            if (selectedMessages.length > 0) {
-                msgs = Array.from(selectedMessages).map(msg => msg.querySelector('.message-content').dataset.text);
-                messagesToRemove = selectedMessages;
-            } else {
-                msgs = [this.selectedMsgElement.querySelector('.message-content').dataset.text];
-                messagesToRemove = [this.selectedMsgElement];
-            }
-
-            let callback = async text => await addHeaderAndText(path, todayHeader(), ucfirst(text), true, false);
-            for (const msg of msgs) {
-                await moveFromChat(msg, callback);
-                await renderMessages();
-            }
-
-            messagesToRemove.forEach(message => {
-                message.classList.add('removing');
-                setTimeout(() => {
-                    message.remove();
-                }, 300);
-            });
-            chatInput.focus();
-            renderSidebar('', [path]);
-            this.close();
-        } else {
-            await openFile(path);
-            if (line !== undefined) {
-                currentEditor.setCursor({line, ch: 0});
-                currentEditor.scrollIntoView(null, currentEditor.getScrollInfo().clientHeight / 2);
-            }
-            this.close();
-        }
     }
 
     handleEnterKey() {
         const resultsList = document.getElementById('search-results').querySelectorAll('li');
         const item = resultsList[this.focusedIndex];
         if (!item) return;
-        const dir = item.getAttribute('data-dir');
-        if (dir !== null) {
-            this.moveToDir(dir);
-            return;
-        }
         const path = item.getAttribute('data-path');
         const line = item.getAttribute('data-line');
-        this.moveToFile(path, line === null ? undefined : Number(line));
+        this.openResult(path, line === null ? undefined : Number(line));
     }
 
     updateFocusedItem() {
@@ -518,29 +330,6 @@ class SearchModal {
                 lastModified: getMemFile(path).lastModified,
             })
         });
-
-        results = results
-            .sort((a, b) => b.lastModified - a.lastModified)
-            .slice(0, SearchModal.RECENT_RESULTS);
-
-        this.showResults(results);
-    }
-
-    showRootFiles() {
-        let results = [];
-        for (const filename of Object.keys(files)) {
-            if (filename.endsWith('/')) {
-                continue;
-            }
-
-            if (filename === toFilename(CONFIG_PATH)) {
-                continue;
-            }
-
-            results.push({
-                path: '/' + filename, lastModified: files[filename].lastModified,
-            });
-        }
 
         results = results
             .sort((a, b) => b.lastModified - a.lastModified)
@@ -580,11 +369,7 @@ class MoveModal {
                 this.close();
                 event.preventDefault();
                 event.stopPropagation();
-                if (isChat) {
-                    chatInput.focus();
-                } else {
-                    currentEditor.focus();
-                }
+                currentEditor.focus();
             }
         });
 

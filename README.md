@@ -1,3 +1,30 @@
+# Files.md — personal notes fork
+
+This fork is a browser editor for Markdown folders. Open notes directly from the
+file tree, search their contents, and edit them in either pane. The browser has
+no chat inbox, message composer, or conversational agent. Existing `Chat.md`
+files remain ordinary editable notes.
+
+The standalone server watches the notes directory for external changes, pushes
+updates to the browser, and saves edits with content-version checks, atomic
+writes, and recoverable backups. Browser drafts survive reloads and interrupted
+connections. File deletion requires an explicit action.
+
+- [Run the local notes server and recover backups](cmd/local-server/README.md)
+- [Run the safety tests](docs/e2e-tests.md)
+- [License](LICENSE)
+
+The directory label above the file tree identifies the active workspace. Open a
+browser-selected folder using the folder icon in the toolbar. An empty workspace
+stays empty until you create a note.
+
+Based on [zakirullin/files.md](https://github.com/zakirullin/files.md). The original
+project documentation below is retained as historical reference and describes
+features that this fork's browser application no longer includes.
+
+<details>
+<summary>Original upstream documentation (historical)</summary>
+
 <img src="https://github.com/zakirullin/files.md/raw/main/web/img/icon.png" alt="Files.md icon" title="Files.md" align="right" height="76" />
 
 # Files.md  
@@ -411,3 +438,4 @@ Read 4K randomly from SSD = 150,000 ns
 - `13.03.2023` Package db.go doesn't store userID (we often use it separately...) Do we? Maybe we gonna use it without userID (like global bot stats?). Added: moved userID to class. Maybe in later we'll need this class outside of user's scope, but let's stay in the future. :)
 - `13.06.2023` We can't ucfist filename in fs.Put - what if that was user-created file (outside the bot), i.e. it comes with lowercase.
 
+</details>

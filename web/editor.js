@@ -77,7 +77,6 @@ function initEditor(el) {
             }
             currentEditor = newEditor;
             currentEditor.refresh();
-            closeChatModal();
             log('Focused to:', newEditor.path);
         };
         activate();
@@ -146,10 +145,6 @@ function initEditor(el) {
         // Handle action links
         if (path === 'cmd:openDir') {
             openDir();
-            return;
-        }
-        if (path === 'cmd:openChat') {
-            openChat();
             return;
         }
 
@@ -254,7 +249,7 @@ function initEditor(el) {
     // Programmatic loads (openFile's setValue) are not user edits.
     newEditor.on('change', function (cm, change) {
         if (change.origin === 'remote') return;
-        if (window.FILES_MD_LOCAL_SERVER && cm.path && cm.path !== CHAT_PATH &&
+        if (window.FILES_MD_LOCAL_SERVER && cm.path &&
             (!isMessingWithCurrentEditor || change.origin !== 'setValue')) {
             // Persist every edit synchronously: crashes and mobile tab eviction
             // need not deliver beforeunload or wait for the autosave interval.

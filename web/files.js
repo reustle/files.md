@@ -474,15 +474,10 @@ async function syncLocalFileWithServer(path) {
         }
         // The server acked `content` - but only report "synced" if the source
         // of truth still holds exactly that; edits made mid-flight stay orange
-        // until the next tick confirms them. In chat mode messages are written
-        // straight to the file (not through the editor), so compare against a
-        // fresh read of the file; for the editor, getCurrentContent() (not
-        // getValue()) because the `# Filename` header line is stripped from
-        // what is written and synced.
+        // until the next tick confirms them. Compare the editor body because
+        // the editable filename header is not part of the saved note content.
         if (window.currentEditor?.path === path) {
-            const truth = (typeof isChat !== 'undefined' && isChat && path === CHAT_PATH)
-                ? await (await (await getFileHandle(path)).getFile()).text()
-                : getCurrentContent();
+            const truth = getCurrentContent();
             if (truth === content) {
                 lastSyncOkAt = Date.now();
                 renderSyncStatus('ok');
@@ -1136,7 +1131,7 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
 
     if (window.FILES_MD_LOCAL_SERVER) {
         const other = el === 'editor2-textarea' ? window.editor : window.editor2;
-        if (other?.path === path && path !== CHAT_PATH) {
+        if (other?.path === path) {
             // One editable buffer per note: independent split-pane buffers
             // could otherwise replace each other's unsent per-note draft.
             currentEditor = other;
@@ -1178,19 +1173,8 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
     // We should do this before any awaits.
     isMessingWithCurrentEditor = true;
     try {
-        if (path === CHAT_PATH) {
-            openChat();
-            return;
-        } else {
-            const codemirror = document.querySelector('.CodeMirror-wrap');
-            codemirror.style.display = 'block';
-            chat.style.display = 'none';
-            chatInput.style.display = 'none';
-            isChat = false;
-        }
-        // chatButton.classList.remove('hidden');
-        chatContainer.style.display = 'none';
-        closeChatModal();
+        document.getElementById('notes-empty').hidden = true;
+        document.getElementById('editor-container').style.display = 'block';
 
         const start = performance.now();
 
@@ -1268,6 +1252,7 @@ async function openFile(path, saveToHistory = true, el = 'editor-textarea') {
         }
 
         const end = performance.now();
+        currentEditor.setOption('readOnly', false);
         currentEditor.noteVersion = getServerFile(path)?.version;
         log(`File ${path} opened in: ${(end - start).toFixed(3)} milliseconds, opId: ${id}`);
 
@@ -1300,6 +1285,7 @@ async function syncCurrentFile(switchAwayEditor = false) {
     }
 
     const savingEditor = currentEditor;
+    const savingPath = savingEditor.path;
     const getSavingContent = () => window.FILES_MD_LOCAL_SERVER ? noteEditorContent(savingEditor) : getCurrentContent();
 
     // Skip sync if we don't have a saved dir
@@ -1317,57 +1303,15 @@ async function syncCurrentFile(switchAwayEditor = false) {
         while (isSyncingFiles) await new Promise(resolve => setTimeout(resolve, 25));
     }
     // TODO replace with queues?
-    if (isMessingWithCurrentEditor || currentEditor !== savingEditor) {
+    if (isMessingWithCurrentEditor || currentEditor !== savingEditor ||
+        !savingPath || savingEditor.path !== savingPath) {
         return;
     }
     isMessingWithCurrentEditor = true;
 
-    const path = savingEditor.path;
+    const path = savingPath;
     let isCurrentEditorSame = () => {
         return path === window.currentEditor.path;
-    }
-
-    if (path === CHAT_PATH) {
-        // Try to load local changes.
-        if (chatIsClean) {
-            try {
-                let inMemoryLastModified = getMemFile(path)?.lastModified;
-                let file = await ((await getFileHandle(CHAT_PATH)).getFile());
-
-                // Update last modified in memory.
-                let memFile = getMemFile(path);
-                if (memFile !== null) {
-                    memFile.lastModified = file.lastModified;
-                    addMemFile(path, memFile);
-                }
-
-                let localLastModified = file.lastModified;
-                // TODO inmemory lastmodified should be reloaded
-                if (inMemoryLastModified !== localLastModified) {
-                    isMessingWithCurrentEditor = false;
-                    if (!switchAwayEditor) {
-                        await openFile(CHAT_PATH);
-                    }
-                    return;
-                }
-            } catch (e) {
-                logError('Error opening file:', e);
-                isMessingWithCurrentEditor = false;
-                return;
-            }
-        }
-
-        isMessingWithCurrentEditor = false;
-
-        if (!switchAwayEditor) {
-            try {
-                await syncLocalFileWithServer(CHAT_PATH);
-            } catch (error) {
-                logError('Error during sync with server:', error);
-            }
-        }
-
-        return;
     }
 
     // Track in-editor renaming based on header.
@@ -1879,7 +1823,7 @@ function findSiblingPath(path) {
     let foundDesiredPath = false;
     let nextPath = null;
     walk(files, (filePath, isFile) => {
-        if (filePath === CONFIG_PATH || filePath === CHAT_PATH) {
+        if (filePath === CONFIG_PATH) {
             return;
         }
 
@@ -1910,7 +1854,7 @@ function findSiblingPath(path) {
 async function removeCurrentFile() {
     const cm = currentEditor;
     const path = cm?.path;
-    if (!path || path === CHAT_PATH) return;
+    if (!path) return;
     while (isMessingWithCurrentEditor || isSyncingFiles || isSaving) {
         await new Promise(resolve => setTimeout(resolve, 25));
     }
@@ -1944,33 +1888,5 @@ async function removeCurrentFile() {
     await renderSidebar();
     if (currentEditor !== cm) return;
     if (nextFilePath) await openFile(nextFilePath);
-    else await openRandomFile();
-}
-
-async function openRandomFile() {
-    if (debug) {
-        await openFile(debug.dir, debug.file);
-        return;
-    }
-
-    const allFiles = [];
-    walkFilesExcludingSystemDirs((path) => {
-        if (path === CONFIG_PATH) {
-            return;
-        }
-
-        allFiles.push(path);
-    });
-
-    if (allFiles.length === 0) {
-        logError('No files found to open.');
-        return;
-    }
-
-    const randomPath = allFiles[Math.floor(Math.random() * allFiles.length)];
-    try {
-        await openFile(randomPath);
-    } catch (error) {
-        logError('Failed to open random file:', error);
-    }
+    else await openNotesHome({saveCurrent: false});
 }

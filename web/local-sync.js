@@ -157,7 +157,7 @@ function noteEditorContent(cm) {
 }
 
 function editorsForNote(path) {
-    return [window.editor, window.editor2].filter(cm => cm && cm.path === path && path !== CHAT_PATH);
+    return [window.editor, window.editor2].filter(cm => cm && cm.path === path);
 }
 
 function updateNoteEditor(cm, content, version) {
@@ -291,7 +291,7 @@ async function syncLocalNotes(forcePath) {
         saveServerFiles();
         lastSyncOkAt = Date.now();
         renderSyncStatus(Object.keys(localDrafts).length || Object.keys(localDirectoryChanges).length ||
-            [window.editor, window.editor2].some(cm => cm?.path && cm.path !== CHAT_PATH && !cm.isClean()) ? 'edits' : 'ok');
+            [window.editor, window.editor2].some(cm => cm?.path && !cm.isClean()) ? 'edits' : 'ok');
         if (localSyncFailed) localSyncNotice('');
         localSyncFailed = false;
         if (Object.keys(conflicts).length) {
@@ -369,7 +369,8 @@ async function applyNotesSnapshot(snapshot, resolved) {
             cm.path = undefined;
             cm.setValue('');
             cm.markClean();
-            if (cm === currentEditor) await openChat();
+            cm.setOption('readOnly', true);
+            if (cm === window.editor2) hideEditor2();
         }
         changed.push(path);
     }
@@ -390,7 +391,10 @@ async function applyNotesSnapshot(snapshot, resolved) {
     }
     server.directories = snapshot.directories;
     await renderSidebar('', changed);
-    if (isChat && (changed.includes(CHAT_PATH) || !snapshot.files['Chat.md'])) await renderMessages();
+    if (!window.editor?.path) {
+        document.getElementById('notes-empty').hidden = false;
+        document.getElementById('editor-container').style.display = 'none';
+    }
 }
 
 function startLocalNotesSync() {
@@ -440,7 +444,7 @@ async function watchLocalNotes() {
 window.addEventListener('beforeunload', event => {
     if (!window.FILES_MD_LOCAL_SERVER) return;
     for (const cm of [window.editor, window.editor2]) {
-        if (cm?.path && cm.path !== CHAT_PATH && !cm.isClean()) {
+        if (cm?.path && !cm.isClean()) {
             try { stageLocalDraft(cm.path, noteEditorContent(cm), cm.noteVersion, cm.getLine(0)); } catch {}
         }
     }

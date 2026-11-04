@@ -11,7 +11,7 @@ All files are plain Markdown (.md) stored locally.
 ├── <category>/           # Note directories (brain/, happiness/, ...)
 │   └── *.md              # Notes, e.g. brain/Memory.md
 │
-├── Chat.md               # Unsorted stuff and tasks
+├── Chat.md               # Optional existing note, treated like any other Markdown file
 ├── Later.md              # Postponed tasks (checklist format)
 │
 ├── Read.md               # Reading list (checklist)
@@ -37,15 +37,11 @@ All files are plain Markdown (.md) stored locally.
 One idea per file. The filename is the title. Files can link to each other using standard Markdown: `[title](file.md).
 Relations among ideas are far more important than the ideas themselves.
 
-### Chat (Chat.md)
-Append-only chat log. New messages are appended with timestamps under daily headers.
-```
-#### 15 August, Friday
-`10:30` First message of the day
-`14:22` Another thought
-```
+### Existing notes and tasks
+There is no dedicated chat or message inbox in this fork. Existing `Chat.md`
+files are ordinary editable Markdown notes and must never be deleted as part of
+removing application features. Tasks can be written in any note.
 
-### Tasks (Chat.md, Later.md)
 Checklist format. Each task is a checklist item.
 ```
 - [ ] Pay the bills

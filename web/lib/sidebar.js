@@ -76,17 +76,7 @@ function renderSidebar(focusDir = '', modifiedPaths) {
     root = new TreeNode('');
     root.path = '/';
 
-    let chat = new TreeNode('chat');
-    chat.path = CHAT_PATH;
-    if (isChat || currentEditor.path === undefined) {
-        chat.setSelected(true);
-    }
-    chat.on('click', async function (n, node) {
-        await openChat();
-    });
-    root.addChild(chat)
-
-    // Later sits right under the chat (today) at the top of the sidebar.
+    // Keep the existing postponed-task note pinned when present.
     if (files[toFilename(LATER_PATH)] !== undefined) {
         let laterNode = new TreeNode('later', {expanded: false, dir: false});
         laterNode.path = LATER_PATH;
@@ -176,7 +166,7 @@ function renderSidebar(focusDir = '', modifiedPaths) {
             return;
         }
 
-        // Later.md is rendered at the top under the chat, skip it here.
+        // Later.md is rendered at the top, skip it here.
         if (path === LATER_PATH) {
             return;
         }
@@ -286,7 +276,7 @@ function renderSidebar(focusDir = '', modifiedPaths) {
             return;
         }
 
-        if ([CONFIG_PATH, CHAT_PATH, LATER_PATH].includes(path)) {
+        if ([CONFIG_PATH, LATER_PATH].includes(path)) {
             return;
         }
 
@@ -922,9 +912,7 @@ function TreeView(root, container, options) {
                 } else if (['journal', 'habits', 'insights'].includes(nodeStr)) {
                     groupHeaderText = "PERSONAL";
                     groupHeaderClass = "personal";
-                } else if (nodeStr === 'chat') {
-                    // groupHeaderText = "Personal";
-                    groupHeaderClass = "personal";
+
                 } else {
                     groupHeaderText = "FILES";
                     groupHeaderClass = "user-dirs";
@@ -949,8 +937,8 @@ function TreeView(root, container, options) {
         }
 
         // Both files and folders are draggable. Only the synthetic system
-        // entries (chat, later, the global lists) stay pinned in place.
-        if (!['later', 'watch', 'shop', 'read', 'chat'].includes(node.toString())) {
+        // entries (later and the global lists) stay pinned in place.
+        if (!['later', 'watch', 'shop', 'read'].includes(node.toString())) {
             span_desc.draggable = true;
         }
 
@@ -1130,9 +1118,7 @@ function TreeView(root, container, options) {
             if (startsWithEmoji(name)) {
                 ret += '<span class="tree-mod_icon" ><div style="width: 22px; text-align: center; transform: translateY(-2px);">' + getFirstEmoji(node.toString()) + '</div></span>';
                 name = trimFirstEmoji(name);
-            } else if (node.toString() === 'chat') {
-                ret += '<span class="tree-mod_icon" style="padding-right: 2px">' + TreeConfig.chat_icon + '</span>';
-                name = 'chat';
+
             } else if (icon != "") {
                 ret += '<span class="tree-mod_icon">' + icon + '</span>';
             } else if ((icon = TreeUtil.getProperty(options, "leaf_icon", "")) != "") {
@@ -1150,9 +1136,6 @@ function TreeView(root, container, options) {
             span_desc.innerHTML = ret;
             span_desc.appendChild(document.createTextNode(name));
             span_desc.classList.add("tree-leaf");
-            if (node.toString() === 'chat') {
-                span_desc.classList.add("sidebar-chat");
-            }
 
             li_outer.appendChild(span_desc);
         } else {
@@ -1223,7 +1206,6 @@ const TreeUtil = {
     later_icon: "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"22\" height=\"22\" fill=\"none\" viewBox=\"0 0 32 32\"><circle cx=\"16\" cy=\"16\" r=\"13\"  stroke-width=\"2\"/> <path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M16 8v8l4 4\"/></svg>\n",
     checklists_icon: "\n" +
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"22\" height=\"22\" fill=\"none\" viewBox=\"0 0 32 32\"><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M29 16a13 13 0 11-26 0 13 13 0 0126 0h0z\"/><path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M11.5 16l3.5 3.5 6-6\"/></svg>\n",
-    chat_icon: "<svg xmlns=\"http://www.w3.org/2000/svg\" style=\"transform: translateX(-3px);\" width=\"25px\" height=\"25px\" fill=\"none\" viewBox=\"0 0 30 30\"> <path stroke-linecap=\"round\" stroke-linejoin=\"round\" stroke-width=\"2\" d=\"M 25 7 H 11 a 4 4 0 0 0 -4 4 v 10 a 4 4 0 0 0 4 4 h 7 l 6 4 v -4 h 1 a 4 4 0 0 0 4 -4 V 11 a 4 4 0 0 0 -4 -4 z\"/> </svg>",
     journal_icon: "<svg width=\"22px\" height=\"22px\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M12 6.00019C10.2006 3.90317 7.19377 3.2551 4.93923 5.17534C2.68468 7.09558 2.36727 10.3061 4.13778 12.5772C5.60984 14.4654 10.0648 18.4479 11.5249 19.7369C11.6882 19.8811 11.7699 19.9532 11.8652 19.9815C11.9483 20.0062 12.0393 20.0062 12.1225 19.9815C12.2178 19.9532 12.2994 19.8811 12.4628 19.7369C13.9229 18.4479 18.3778 14.4654 19.8499 12.5772C21.6204 10.3061 21.3417 7.07538 19.0484 5.17534C16.7551 3.2753 13.7994 3.90317 12 6.00019Z\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
     journal_open_icon: "<svg width=\"22px\" height=\"22px\" viewBox=\"0 0 24 24\" fill=\"currentColor\" xmlns=\"http://www.w3.org/2000/svg\"><path fill-rule=\"evenodd\" clip-rule=\"evenodd\" d=\"M12 6.00019C10.2006 3.90317 7.19377 3.2551 4.93923 5.17534C2.68468 7.09558 2.36727 10.3061 4.13778 12.5772C5.60984 14.4654 10.0648 18.4479 11.5249 19.7369C11.6882 19.8811 11.7699 19.9532 11.8652 19.9815C11.9483 20.0062 12.0393 20.0062 12.1225 19.9815C12.2178 19.9532 12.2994 19.8811 12.4628 19.7369C13.9229 18.4479 18.3778 14.4654 19.8499 12.5772C21.6204 10.3061 21.3417 7.07538 19.0484 5.17534C16.7551 3.2753 13.7994 3.90317 12 6.00019Z\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
 
@@ -1356,7 +1338,6 @@ var TreeConfig = {
     open_icon: TreeUtil.default_open_icon,
     close_icon: TreeUtil.default_close_icon,
     later_icon: TreeUtil.later_icon,
-    chat_icon: TreeUtil.chat_icon,
     checklists_icon: TreeUtil.checklists_icon,
     journal_icon: TreeUtil.journal_icon,
     journal_icon_filled: TreeUtil.journal_open_icon,
@@ -1428,7 +1409,7 @@ async function folderContextMenu(e, node) {
     const path = node && node.path;
     if (!path || path === '/') return;
 
-    const isFile = !isDir && !path.endsWith('/') && path !== CHAT_PATH;
+    const isFile = !isDir && !path.endsWith('/');
     if (!isDir && !isFile) return;
 
     // Visually mark the targeted node as selected while the menu is open, so
@@ -1537,8 +1518,8 @@ function buildFolderMenu(item, dirPath) {
                 currentEditor.path = undefined;
             }
             await renderSidebar();
-            if (editorWasInside && typeof openRandomFile === 'function') {
-                openRandomFile();
+            if (editorWasInside) {
+                await openNotesHome({saveCurrent: false});
             }
         } catch (err) {
             logError('removeDir failed', err);

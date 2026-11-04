@@ -1,24 +1,24 @@
 const sidebar = document.getElementById('sidebar');
 const content = document.getElementById('content')
 
-const CHAT_PATH = '/Chat.md';
 const LATER_PATH = '/Later.md';
 const READ_PATH = '/Read.md';
 const SHOP_PATH = '/Shop.md';
 const WATCH_PATH = '/Watch.md';
 const LOG_PATH = '/archive/Log.md';
-const CHATLOG_PATH = '/archive/Chatlog.md';   // append-only log of everything added to chat
-// "To Archive" collects records here, one file per year
-const archivePath = () => `/archive/Archive ${new Date().getFullYear()}.md`;
-const OPEN_CHAT_AFTER_IDLE = 60 * 60 * 1000; // ms
-
-let openChatIdleTimer = null;
-let isChat = false;
 let isMemFS = false;
 let debug = false;
 // let debug = {dir: '', file: 'File.md', loaded: false};
 
+function updateWorkspaceLabel(name) {
+    const label = document.getElementById('workspace-path');
+    const text = typeof name === 'string' && name.trim() ? name : 'Notes';
+    label.textContent = text;
+    label.title = text;
+}
+
 async function init() {
+    updateWorkspaceLabel(window.FILES_MD_LOCAL_SERVER ? 'Notes' : 'Browser notes');
     // Ask the browser to mark our origin as persistent so the quota
     // manager can't evict the auth cookie + localStorage under disk
     // pressure. Chrome auto-grants for installed PWAs / high-engagement
@@ -77,6 +77,7 @@ async function init() {
             if (!response.ok) throw new Error(`Session check failed: ${response.status}`);
             const session = await response.json();
             if (session.authenticated) {
+                updateWorkspaceLabel(session.workspacePath);
                 markServerOk();
                 notice.hidden = true;
             } else {
@@ -93,17 +94,11 @@ async function init() {
 
     const savedDirHandle = await getSavedRootDirHandle();
     const hasSavedLocalDir = typeof FileSystemDirectoryHandle !== 'undefined' && savedDirHandle instanceof FileSystemDirectoryHandle;
-    if (hasSavedLocalDir) {
-        isMemFS = false;
-        document.getElementById('open-folder').style.display = 'none';
-    } else if (typeof window.showDirectoryPicker === 'function') {
-        document.getElementById('open-folder').style.display = 'flex';
-        isMemFS = true;
-    } else {
-        // Safari/Firefox have no File System Access API for now, hide CTA.
-        document.getElementById('open-folder').style.display = 'none';
-        isMemFS = true;
-    }
+    document.getElementById('open-folder-btn').style.display =
+        typeof window.showDirectoryPicker === 'function' ? 'inline-flex' : 'none';
+    isMemFS = !hasSavedLocalDir;
+    const fallbackWorkspaceLabel = document.getElementById('workspace-path').textContent;
+    if (hasSavedLocalDir) updateWorkspaceLabel(savedDirHandle.name);
 
     // Let's create local-first like experience by preloading images.
     if (isMemFS) {
@@ -115,9 +110,11 @@ async function init() {
         const permission = await (await getRootDirHandle()).queryPermission({ mode: 'readwrite' });
         log('PERMISSION', permission);
         if (permission !== 'granted') {
-            document.getElementById('open-folder').style.display = 'flex';
+            document.getElementById('open-folder-btn').style.display = 'inline-flex';
             // TODO maybe ask user to check "Allow on every visit" on left part of the sidebar
             await removeSavedRootDirHandle();
+            isMemFS = true;
+            updateWorkspaceLabel(fallbackWorkspaceLabel);
             alert('Can\'t access folder.\n\nPlease, reopen the folder again and check "Allow on every visit" checkbox');
         }
     }
@@ -128,27 +125,59 @@ async function init() {
     files = await loadLocalFiles(rootDirHandle);
     log(`Files loaded in ${performance.now() - perf}ms`);
 
-    initChat();
-
     perf = performance.now();
     renderSidebar();
     log(`Sidebar built in: ${(performance.now() - perf).toFixed(3)} milliseconds`);
-
-    const userHasCustomAPIUrl = localStorage.getItem('apiUrl') !== null;
-    if (isMemFS && !userHasCustomAPIUrl) {
-        // By the time a user has setup custom API, he doesn't need welcome file :)
-        await openFile('/🪴 Welcome.md');
-    } else {
-        openChat();
-    }
 
     perf = performance.now();
     await syncFilesWithServer().catch(error => logError('Initial sync:', error.message));
     await renderSidebar();
     await syncMediaFiles();
     log(`Files initialized in: ${(performance.now() - perf).toFixed(3)} milliseconds`);
+    await openNotesHome({saveCurrent: false});
     startLocalNotesSync();
 
+}
+
+// A workspace starts with an existing note or an empty, non-writing view.
+// Opening the app must never create a note on the user's behalf.
+async function openNotesHome({saveCurrent = true} = {}) {
+    while (isMessingWithCurrentEditor || isSyncingFiles || isSaving) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (saveCurrent && currentEditor?.path && !currentEditor.isClean()) {
+        await syncCurrentFile(true);
+        // Failed writes and invalid pending renames leave the buffer dirty.
+        // Keep it visible instead of replacing it with the home view.
+        if (!currentEditor.isClean()) return;
+    }
+    const paths = [];
+    walk(files, (path, isFile) => {
+        if (isFile && /\.md$/i.test(path)) paths.push(path);
+    });
+    paths.sort((a, b) => a.localeCompare(b));
+    const remembered = history.state?.path;
+    const next = paths.includes(remembered) ? remembered
+        : paths.includes('/🪴 Welcome.md') ? '/🪴 Welcome.md' : paths[0];
+    if (next) {
+        await openFile(next, false);
+        return;
+    }
+    isMessingWithCurrentEditor = true;
+    try {
+        currentEditor = editor;
+        editor.path = undefined;
+        editor.noteVersion = undefined;
+        editor.setValue('');
+        editor.markClean();
+        editor.setOption('readOnly', true);
+        hideEditor2();
+        document.getElementById('editor-container').style.display = 'none';
+        document.getElementById('notes-empty').hidden = false;
+        renderSidebar();
+    } finally {
+        isMessingWithCurrentEditor = false;
+    }
 }
 
 // Logic for click-handling is in click.js => isWikiLink
@@ -158,7 +187,7 @@ function createAutocompleteDict() {
 
     // Collect all files with their metadata
     walkFilesExcludingSystemDirs((path) => {
-        if (path === CONFIG_PATH || path === CHAT_PATH || path === LATER_PATH || path === READ_PATH || path === WATCH_PATH || path === SHOP_PATH) {
+        if (path === CONFIG_PATH || path === LATER_PATH || path === READ_PATH || path === WATCH_PATH || path === SHOP_PATH) {
             return;
         }
         if (path === currentPath) {
@@ -192,7 +221,7 @@ function createAutocompleteDict() {
         }
 
         Object.keys(files[dir]).forEach(filename => {
-            if (filename === CONFIG_PATH || filename === CHAT_PATH) {
+            if (filename === CONFIG_PATH) {
                 return;
             }
             const key = `${filename.replace(/\.md$/, '')}`;
@@ -324,6 +353,21 @@ async function openDir() {
     }
     // TODO check that permissions are given?
 
+    // Flush the old workspace before changing its directory handle. Otherwise
+    // opening the first note in the new folder could save the old buffer there.
+    const previousEditor = currentEditor;
+    for (const cm of [window.editor, window.editor2]) {
+        if (!cm?.path || cm.isClean()) continue;
+        currentEditor = cm;
+        await syncCurrentFile(true);
+        if (!cm.isClean()) {
+            currentEditor = previousEditor;
+            showToast('Save the pending note before opening another folder');
+            return;
+        }
+    }
+    currentEditor = previousEditor;
+
     // Don't race the existing files loading.
     while (isLoadingLocalFiles) {
         await new Promise(r => setTimeout(r, 50));
@@ -344,6 +388,11 @@ async function openDir() {
     pendingFileMoves.clear();
 
     await saveDirectoryHandle(dirHandle);
+    for (const cm of [window.editor, window.editor2]) {
+        if (!cm) continue;
+        cm.path = undefined;
+        cm.noteVersion = undefined;
+    }
 
     // Copy user-created files from the temporary FS into the opened folder.
     try {
@@ -360,9 +409,9 @@ async function openDir() {
     }
 
     isMemFS = false;
-    document.getElementById('open-folder').style.display = 'none';
+    updateWorkspaceLabel(dirHandle.name);
     renderSidebar();
-    await openChat();
+    await openNotesHome({saveCurrent: false});
 }
 
 function getCurrentContent() {
@@ -534,11 +583,7 @@ function toggleSidebar() {
         sidebar.style.display = 'none';
         openSidebar.style.display = 'block';
         document.body.classList.remove('sidebar-open');
-        if (isChat) {
-            chatInput.focus();
-        } else {
-            currentEditor.focus();
-        }
+        currentEditor.focus();
     }
 }
 
@@ -784,7 +829,7 @@ window.addEventListener('keydown', async (event) => {
     if (isMetaKey(event) && event.shiftKey && event.code === 'KeyF') {
         event.preventDefault();
         event.stopPropagation();
-        searchModal.open('', null, null, true);
+        searchModal.open('', true);
     }
 
     if (isMetaKey(event) && event.key === 'm') {
@@ -824,63 +869,21 @@ document.addEventListener('keydown', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-    // TODO cursor shouldn't jump to top once we hit "esc".
     if (event.key === 'Escape') {
-        // Close dialogs even if focus left them (e.g. after alt-tab)
         const search = document.getElementById('search');
         const move = document.getElementById('move');
         if (search.style.display !== 'none' || move.style.display !== 'none') {
             searchModal.close();
             moveModal.close();
-            isChat ? chatInput.focus() : currentEditor.focus();
+            currentEditor.focus();
             return;
         }
-
-        if (chatContainer.style.display !== 'none') {
-            const selectedMessages = chat.querySelectorAll('.message.selected');
-            if (selectedMessages.length > 0) {
-                selectedMessages.forEach(message => message.classList.remove('selected'));
-                event.preventDefault();
-                event.stopPropagation();
-                return;
-            }
-
-            closeChatModal();
-            editor.focus();
-            return;
-        }
-
         hideEditor2();
         editor.focus();
-
-        const allMessages = chat.querySelectorAll('.message');
-        allMessages.forEach(message => message.classList.remove('selected'));
-        // If in chat, focus chat input
-        if (isChat) {
-            chatInput.focus();
-        }
-    }
-});
-
-// Toggle focus mode
-document.addEventListener('keydown', function(event) {
-    // Cmd+shift+enter toggle chat modal.
-    if (event.shiftKey && isMetaKey(event) && event.key === 'Enter') {
-        event.preventDefault();
-        if (isChat) {
-            history.back();
-        } else {
-            event.preventDefault();
-            toggleChatModal();
-        }
-        return;
     }
     if (isSidebarToggleShortcut(event)) {
         event.preventDefault();
         toggleSidebar();
-    }
-    if (isMetaKey(event) && event.key === 'Enter') {
-        openChat();
     }
 });
 
@@ -911,28 +914,14 @@ window.addEventListener('focus', async () => {
         if (localNotesInitialized) await syncLocalNotes().catch(() => {});
         return;
     }
-    // Clear any pending chat open timer.
-    if (openChatIdleTimer) {
-        clearTimeout(openChatIdleTimer);
-        openChatIdleTimer = null;
-    }
-
-    // We don't want to do heavy stuff when chat is open.
     const userHasCustomAPIUrl = localStorage.getItem('apiUrl') !== null;
-    if (isChat || (isMemFS && !userHasCustomAPIUrl)) {
-        if (isChat) {
-            document.getElementById('chat-input').focus();
-        }
-        return false;
-    }
+    if (isMemFS && !userHasCustomAPIUrl) return;
 
     log('FOCUS');
 
     if (currentEditor.path === undefined) {
         return;
     }
-
-    document.getElementById('chat-input').focus();
 
     const savedDirectoryHandle = await getRootDirHandle();
     // TODO check if access granted
@@ -950,7 +939,7 @@ window.addEventListener('focus', async () => {
     log('Sync completed');
 });
 
-// Sync files on chat focus lose.
+// Save pending note edits when the window loses focus.
 window.addEventListener('blur', async function() {
     if (!window.currentEditor) return;
     if (window.FILES_MD_LOCAL_SERVER) {
@@ -962,11 +951,6 @@ window.addEventListener('blur', async function() {
     }
     log('BLUR');
     editor.refresh();
-
-    // Start timer to open chat after idle.
-    openChatIdleTimer = setTimeout(() => {
-        openChat();
-    }, OPEN_CHAT_AFTER_IDLE);
 
     // Sync media first, so that new images for current file would be loaded
     // if files is not empty object
@@ -987,18 +971,6 @@ window.addEventListener('blur', async function() {
     await renderSidebar();
     log('Sync completed');
 });
-
-document.addEventListener('keydown', (e) => {
-    // If search or move dialog is focused - return
-    if (document.getElementById('search').style.display !== 'none' ||
-        document.getElementById('move').style.display !== 'none') {
-        return;
-    }
-
-    if (isChat) {
-        return;
-    }
-}, true);
 
 window.addEventListener('beforeunload', function() {
     clearInterval(window.saver);

@@ -67,15 +67,6 @@ async function getTemporaryStorageDirHandle() {
         }
         await createFiles(WELCOME_FILES, root);
 
-        // Retouch My project.md file, so it appears in chat's quick buttons for better demo.
-        if (!archived.has('My Project.md')) {
-            await new Promise(r => setTimeout(r, 10));
-            const fh = await root.getFileHandle('My Project.md', { create: true });
-            const w = await fh.createWritable();
-            await w.write(WELCOME_FILES['My Project.md'].content);
-            await w.close();
-        }
-
         return root;
     } catch (e) {
         console.warn('OPFS unavailable, using in-memory FS:', e.message);
@@ -125,8 +116,7 @@ class MemFile {
         this.kind = 'file';
         this.name = name;
         this.content = content;
-        // We want "My project.md" to appear in chat's quick buttons, for better demo.
-        this.lastModified = Date.now() + (name === 'My Project.md' ? 1 : 0);
+        this.lastModified = Date.now();
         this.parent = null;
     }
 
@@ -319,7 +309,7 @@ const WELCOME_FILES = {
     "🪴 Welcome.md": {
         "content":
             "To store files locally, [open or create a folder](cmd:openDir).\n\n" +
-            "Use [chat](cmd:openChat) to dump whatever is on your mind.\n\n" +
+            "Create a note with `Cmd+N` or `Ctrl+N` to capture an idea.\n\n" +
             "Press `Cmd+K` or `Ctrl+K` to quick switch between files.\n\n" +
             "[Markdown Guide](/Markdown%20Guide.md)\n[Zettelkasten](/brain/Zettelkasten.md)\n[Hotkeys](/Hotkeys.md)\n[Links](/Links.md)",
         isFile: true,
@@ -395,8 +385,6 @@ const WELCOME_FILES = {
             "| `Cmd+N` / `Ctrl+N` | New file |\n" +
             "| `Cmd+M` / `Ctrl+M` | Move file |\n" +
             "| `Cmd+D` / `Ctrl+D` | Delete file |\n" +
-            "| `Cmd+Enter` / `Ctrl+Enter` | Open chat |\n" +
-            "| `Cmd+Shift+Enter` / `Ctrl+Shift+Enter` | Toggle chat dialog |\n" +
             "| `Cmd+[` / `Ctrl+[` | Go to previous file |\n" +
             "| `Cmd+]` / `Ctrl+]` | Go to next file  |\n" +
             "| `Cmd+~` / `Ctrl+~` | Toggle sidebar |\n" +

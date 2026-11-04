@@ -104,7 +104,11 @@ func SessionStatus(w http.ResponseWriter, r *http.Request) {
 		_, authenticated = findUserID(cookie.Value)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]bool{"authenticated": authenticated})
+	status := map[string]any{"authenticated": authenticated}
+	if authenticated && config.ServerCfg.RequireSafeSync && config.ServerCfg.LocalNotesDir != "" {
+		status["workspacePath"] = config.ServerCfg.LocalNotesDir
+	}
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 func IssueToken(w http.ResponseWriter, r *http.Request) {

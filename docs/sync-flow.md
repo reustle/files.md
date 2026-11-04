@@ -1,5 +1,11 @@
 # Sync flow
 
+The standalone local server uses content-versioned `/notes/sync` and filesystem
+notifications; see [its storage contract](../cmd/local-server/README.md). Every
+Markdown file follows the same editor path, including existing `Chat.md` notes.
+
+The diagrams below describe the legacy sync transport.
+
 How `openFile`, `syncCurrentEditor`, `syncFilesWithServer`, and `syncLocalFileWithServer` hand off work, and how the server knows what to send or receive.
 
 ## Triggers and who calls whom
@@ -31,12 +37,8 @@ flowchart TD
     G2 -->|yes| Ret2([return])
     G2 -->|no| SetFlag[isMessingWithCurrentEditor = true;<br/>path = currentEditor.path]
 
-    SetFlag --> IsInbox{path == INBOX_PATH?}
-    IsInbox -->|yes| InboxBranch[chat sync logic]
-    InboxBranch --> Ret3([return])
-
-    IsInbox -->|no| RenameCheck{firstLine's filename<br/>!= current filename?}
-    RenameCheck -->|yes| Rename[await remove path<br/>await getFileHandle newPath<br/>await writeIfContentIsDifferent<br/>await renderSidebar]
+    SetFlag --> RenameCheck{firstLine's filename<br/>!= current filename?}
+    RenameCheck -->|yes| Rename[await getFileHandle newPath<br/>await writeIfContentIsDifferent<br/>await remove old path<br/>await renderSidebar]
     Rename --> Ret4([return])
     RenameCheck -->|no| DiffCheck[await isContentEqual<br/>path, getCurrentContent]
 

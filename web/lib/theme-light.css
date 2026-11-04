@@ -21,18 +21,6 @@
         background-image: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABgAAAAwCAMAAAA8VkqRAAAAclBMVEUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACa4vOeAAAAJXRSTlMADcjpDswcLZOzsvOYBvWdbtvTX0D69+ORa1dRJCDtuaF7ZDkoQyuUXgAAAMhJREFUOMvt0reywjAUhOFjKxmcrgMZboL//V8Rm6GwkNUx0LClvhkVZ1fEZoqHqMwO7wuUSb0YxcJKxtLpxIt2SzJRykkQp5RgdAjaIKRJCEn6gWdA9OzRoqLVRscQnc9bdtXX/eyurOF7N3erLVDPwCGHxoVwamH1LwGUBfBbhrCvoLlMitL9DY8trLtJg7qoCj18VAN1OYE/YJBuDe1RJtBVo5wbqPb+GL5yWG1GLX0YZYw5iQ93yQ/yAHfZzu5qt/mxr97VFS15JGSVM0C6AAAAAElFTkSuQmCC");
     }
 
-    .to-recent-btn, .action-btn svg {
-        fill: var(--col-tx-alt);
-        color: var(--col-tx-alt) !important;
-        stroke: var(--col-tx-alt) !important;
-    }
-
-    .to-recent-btn:hover, .action-btn:hover svg {
-        fill: var(--col-link);
-        color: var(--col-link) !important;
-        stroke: var(--col-link) !important;
-    }
-
     #toolbar svg {
         stroke: var(--col-tx-alt) !important;
     }
@@ -41,26 +29,6 @@
         border-radius: 4px;
         stroke:  var(--col-link) !important;
         background: var(--col-bg-active);
-    }
-
-    #close-chat, #fullscreen-chat {
-        color: var(--col-tx-alt) !important;
-    }
-
-    #open-chat-modal:hover svg {
-       stroke: var(--col-link) !important;
-    }
-
-    #close-chat:hover, #fullscreen-chat:hover {
-        color: var(--col-link) !important;
-    }
-
-    #close-chat:hover {
-        color: var(--col-link) !important;
-    }
-
-    #open-chat-modal svg {
-        stroke: #F5F5F5 !important;
     }
 
     #close-sidebar, #close-editor2, #go-forward svg, #go-backward svg {
@@ -77,9 +45,6 @@
         background: var(--col-bg-active);
     }
 
-    .message.own {
-        background: color-mix(in srgb, var(--col-bg) 60%, transparent);
-    }
 }
 
 .cm-s-hypermd-light .cm-header.cm-header-1 {
@@ -134,7 +99,6 @@
     font-weight: 600;
     line-height: 22px
 }
-
 
 .cm-s-hypermd-light .cm-header, .cm-s-hypermd-light .cm-strong, .cm-s-hypermd-light span.cm-url {
     font-family: var(--font) !important;

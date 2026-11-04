@@ -47,7 +47,9 @@ test('should load the Files.md editor', async ({page}) => {
     await expect(page).toHaveTitle('Files.md');
 
     await expect(page.locator('#sidebar')).toBeVisible();
-    await expect(page.locator('#open-folder')).toBeVisible();
+    await expect(page.locator('#workspace-path')).toBeVisible();
+    await expect(page.locator('#open-folder')).toHaveCount(0);
+    await expect(page.locator('#random-file')).toHaveCount(0);
 });
 
 test('should open markdown file via quick panel and see bold text formatting', async ({page}) => {

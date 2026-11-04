@@ -61,6 +61,7 @@ func main() {
 		return fs.NewFS(notes, backend, 0)
 	}
 	config.ServerCfg.RequireSafeSync = true
+	config.ServerCfg.LocalNotesDir = notes
 	watcher, err := notewatch.New(notes)
 	if err != nil {
 		panic(err)
